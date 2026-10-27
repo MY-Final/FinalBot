@@ -10,6 +10,10 @@ const envSchema = z.object({
   NAPCAT_WS_URL: z.string().default(""),
   NAPCAT_ACCESS_TOKEN: z.string().default(""),
   NAPCAT_ACCOUNT_ID: z.string().default(""),
+  NAPCAT_GROUP_REQUIRE_MENTION: z
+    .enum(["0", "1"])
+    .default("1")
+    .transform((value) => value === "1"),
   FINALBOT_CODEX_BIN: z.string().default("codex"),
   FINALBOT_CODEX_MODEL: z.string().default(""),
   FINALBOT_CODEX_SANDBOX: z
@@ -34,6 +38,7 @@ export interface AppConfig {
     wsUrl: string;
     accessToken: string;
     accountId: string;
+    requireGroupMention: boolean;
   };
   codex: {
     executable: string;
@@ -59,6 +64,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       wsUrl: parsed.NAPCAT_WS_URL,
       accessToken: parsed.NAPCAT_ACCESS_TOKEN,
       accountId: parsed.NAPCAT_ACCOUNT_ID,
+      requireGroupMention: parsed.NAPCAT_GROUP_REQUIRE_MENTION,
     },
     codex: {
       executable: parsed.FINALBOT_CODEX_BIN,

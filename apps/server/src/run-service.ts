@@ -106,6 +106,10 @@ export class RunService {
       agent: "codex",
       replyTarget,
     });
+    const session = this.db.getLatestConversationSession(conversationId);
+    if (session?.nativeThreadId) {
+      this.db.updateRun(run.id, { nativeThreadId: session.nativeThreadId });
+    }
     this.publishRun(run);
 
     try {
@@ -122,7 +126,18 @@ export class RunService {
             : `任务${result.state === "interrupted" ? "已中断" : "失败"}：${
                 result.error ?? "未提供错误信息"
               }`;
-        await this.replySender(replyTarget, message).catch(() => undefined);
+        try {
+          await this.replySender(replyTarget, message);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.bus.publish({
+            type: "system",
+            level: "error",
+            message: `Failed to send reply: ${detail}`,
+            at: nowIso(),
+          });
+          console.error(`[finalbot] failed to send reply for ${run.id}: ${detail}`);
+        }
       }
     } finally {
       this.activeConversations.delete(conversationId);
@@ -199,6 +214,7 @@ export class RunService {
           runId: run.id,
           prompt: run.prompt,
           cwd: worktree.path,
+          ...(current.nativeThreadId ? { nativeThreadId: current.nativeThreadId } : {}),
           ...(this.config.codex.model ? { model: this.config.codex.model } : {}),
           sandbox: this.config.codex.sandbox,
         },

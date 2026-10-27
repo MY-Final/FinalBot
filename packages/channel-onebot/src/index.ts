@@ -28,6 +28,7 @@ export interface OneBotConfig {
   wsUrl: string;
   accessToken?: string;
   accountId?: string;
+  requireGroupMention?: boolean;
 }
 
 export interface OneBotConnectionState {
@@ -187,12 +188,20 @@ export class OneBotAdapter {
         accountId: String(event.self_id),
       };
     }
+    if (isSelfAuthoredEvent(event)) return null;
+    const accountId = String(event.self_id ?? this.config.accountId ?? "unknown");
+    if (
+      event.message_type === "group" &&
+      (this.config.requireGroupMention ?? true) &&
+      !isGroupMention(event, accountId)
+    ) {
+      return null;
+    }
     const text = extractText(event.message, event.raw_message);
     if (!text.trim()) return null;
 
     const messageId = String(event.message_id ?? crypto.randomUUID());
     const senderId = String(event.user_id ?? "unknown");
-    const accountId = String(event.self_id ?? this.config.accountId ?? "unknown");
     const externalConversationId =
       event.message_type === "group"
         ? `group:${String(event.group_id ?? "unknown")}`
@@ -277,5 +286,37 @@ export function extractText(
     }
   }
   return parts.join("");
+}
+
+export function isSelfAuthoredEvent(event: {
+  self_id?: string | number | undefined;
+  user_id?: string | number | undefined;
+}): boolean {
+  return (
+    event.self_id !== undefined &&
+    event.user_id !== undefined &&
+    String(event.self_id) === String(event.user_id)
+  );
+}
+
+export function isGroupMention(
+  event: {
+    raw_message?: string | undefined;
+    message?:
+      | string
+      | Array<{ type: string; data?: Record<string, unknown> | undefined }>
+      | undefined;
+  },
+  accountId: string,
+): boolean {
+  if (Array.isArray(event.message)) {
+    return event.message.some(
+      (segment) =>
+        segment.type === "at" &&
+        segment.data !== undefined &&
+        String(segment.data.qq ?? "") === accountId,
+    );
+  }
+  return new RegExp(`\\[CQ:at,qq=${accountId}(?:,|\\])`).test(event.raw_message ?? "");
 }
 

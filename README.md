@@ -54,6 +54,10 @@ NAPCAT_ACCOUNT_ID=...
 FinalBot connects to NapCat directly. It is not an AstrBot plugin and does not require a
 bridge process.
 
+Group messages are ignored unless they mention `NAPCAT_ACCOUNT_ID`. Set
+`NAPCAT_GROUP_REQUIRE_MENTION=0` only when the bot is intentionally listening to all group
+traffic. Private messages do not require a mention.
+
 ## Commands
 
 ```powershell

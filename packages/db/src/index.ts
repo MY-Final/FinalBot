@@ -378,6 +378,19 @@ export class FinalBotDatabase {
     return row ? mapConversation(row) : null;
   }
 
+  getLatestConversationSession(
+    conversationId: string,
+  ): { nativeThreadId: string | null } | null {
+    const row = this.db
+      .query(
+        `SELECT native_thread_id FROM runs
+         WHERE conversation_id = ? AND native_thread_id IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(conversationId) as Row | null;
+    return row ? { nativeThreadId: asNullableString(row.native_thread_id) } : null;
+  }
+
   admitInbound(input: {
     conversationId: string;
     externalMessageId: string;

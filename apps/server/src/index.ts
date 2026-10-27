@@ -28,6 +28,7 @@ const onebot = new OneBotAdapter(
     wsUrl: config.onebot.wsUrl,
     ...(config.onebot.accessToken ? { accessToken: config.onebot.accessToken } : {}),
     ...(config.onebot.accountId ? { accountId: config.onebot.accountId } : {}),
+    requireGroupMention: config.onebot.requireGroupMention,
   },
   async (message) => {
     await runs.admitInbound(message);
