@@ -1,0 +1,34 @@
+{
+  "name": "finalbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/server",
+    "apps/web",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "bun --watch apps/server/src/index.ts",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build:web": "bun run --cwd apps/web build",
+    "build:server": "bun build apps/server/src/index.ts --compile --outfile dist/finalbot",
+    "build:windows": "bun run build:web && bun build apps/server/src/index.ts --compile --windows-hide-console --windows-title FinalBot --windows-description \"FinalBot personal assistant control plane\" --asset apps/web/dist --outfile dist/finalbot.exe",
+    "build": "bun run build:web && bun run build:server",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test",
+    "format": "biome format --write .",
+    "lint": "biome check ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@types/bun": "1.4.4",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.1"
+  }
+}
+

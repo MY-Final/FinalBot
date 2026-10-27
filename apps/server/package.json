@@ -1,0 +1,17 @@
+{
+  "name": "@finalbot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@finalbot/agent-codex": "workspace:*",
+    "@finalbot/channel-onebot": "workspace:*",
+    "@finalbot/core": "workspace:*",
+    "@finalbot/db": "workspace:*",
+    "@finalbot/protocol": "workspace:*",
+    "@finalbot/workspace-git": "workspace:*",
+    "hono": "^4.10.7",
+    "zod": "^4.1.12"
+  }
+}
+

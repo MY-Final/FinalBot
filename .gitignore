@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.tmp/
+.env
+*.log
+data/
+coverage/
+apps/web/.vite/
+apps/desktop/release/
+
