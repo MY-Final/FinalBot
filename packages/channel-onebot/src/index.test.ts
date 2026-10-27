@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { extractText, isGroupMention, isSelfAuthoredEvent } from "./index";
+import {
+  extractText,
+  isGroupMention,
+  isIgnoredUser,
+  isPrivateUserAllowed,
+  isSelfAuthoredEvent,
+} from "./index";
 
 describe("OneBot text extraction", () => {
   test("keeps text and identifies media", () => {
@@ -72,6 +78,19 @@ describe("OneBot group mention routing", () => {
         "479284441",
       ),
     ).toBe(true);
+  });
+});
+
+describe("OneBot private routing", () => {
+  test("only allows configured private users", () => {
+    expect(isPrivateUserAllowed("10001", ["10001"])).toBe(true);
+    expect(isPrivateUserAllowed("10002", ["10001"])).toBe(false);
+    expect(isPrivateUserAllowed("10001", [])).toBe(false);
+  });
+
+  test("blocks configured bot accounts", () => {
+    expect(isIgnoredUser("3430269738", ["3430269738"])).toBe(true);
+    expect(isIgnoredUser("10001", ["3430269738"])).toBe(false);
   });
 });
 

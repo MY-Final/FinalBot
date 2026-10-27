@@ -49,6 +49,8 @@ Configure NapCat to expose a forward WebSocket, then set:
 NAPCAT_WS_URL=ws://192.168.1.20:3001
 NAPCAT_ACCESS_TOKEN=...
 NAPCAT_ACCOUNT_ID=...
+NAPCAT_PRIVATE_USER_IDS=10001,10002
+NAPCAT_IGNORED_USER_IDS=
 ```
 
 FinalBot connects to NapCat directly. It is not an AstrBot plugin and does not require a
@@ -56,7 +58,9 @@ bridge process.
 
 Group messages are ignored unless they mention `NAPCAT_ACCOUNT_ID`. Set
 `NAPCAT_GROUP_REQUIRE_MENTION=0` only when the bot is intentionally listening to all group
-traffic. Private messages do not require a mention.
+traffic. Private messages only work for accounts listed in `NAPCAT_PRIVATE_USER_IDS`; an
+empty list rejects all private messages. `NAPCAT_IGNORED_USER_IDS` is a global denylist for
+known bot accounts and other senders that must never trigger an agent run.
 
 ## Commands
 

@@ -29,6 +29,8 @@ export interface OneBotConfig {
   accessToken?: string;
   accountId?: string;
   requireGroupMention?: boolean;
+  privateUserAllowlist?: string[];
+  ignoredUserIds?: string[];
 }
 
 export interface OneBotConnectionState {
@@ -190,6 +192,14 @@ export class OneBotAdapter {
     }
     if (isSelfAuthoredEvent(event)) return null;
     const accountId = String(event.self_id ?? this.config.accountId ?? "unknown");
+    const senderId = String(event.user_id ?? "unknown");
+    if (isIgnoredUser(senderId, this.config.ignoredUserIds ?? [])) return null;
+    if (
+      event.message_type === "private" &&
+      !isPrivateUserAllowed(senderId, this.config.privateUserAllowlist ?? [])
+    ) {
+      return null;
+    }
     if (
       event.message_type === "group" &&
       (this.config.requireGroupMention ?? true) &&
@@ -201,7 +211,6 @@ export class OneBotAdapter {
     if (!text.trim()) return null;
 
     const messageId = String(event.message_id ?? crypto.randomUUID());
-    const senderId = String(event.user_id ?? "unknown");
     const externalConversationId =
       event.message_type === "group"
         ? `group:${String(event.group_id ?? "unknown")}`
@@ -318,5 +327,13 @@ export function isGroupMention(
     );
   }
   return new RegExp(`\\[CQ:at,qq=${accountId}(?:,|\\])`).test(event.raw_message ?? "");
+}
+
+export function isPrivateUserAllowed(senderId: string, allowlist: string[]): boolean {
+  return allowlist.includes(senderId);
+}
+
+export function isIgnoredUser(senderId: string, ignoredUserIds: string[]): boolean {
+  return ignoredUserIds.includes(senderId);
 }
 

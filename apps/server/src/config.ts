@@ -10,6 +10,8 @@ const envSchema = z.object({
   NAPCAT_WS_URL: z.string().default(""),
   NAPCAT_ACCESS_TOKEN: z.string().default(""),
   NAPCAT_ACCOUNT_ID: z.string().default(""),
+  NAPCAT_PRIVATE_USER_IDS: z.string().default(""),
+  NAPCAT_IGNORED_USER_IDS: z.string().default(""),
   NAPCAT_GROUP_REQUIRE_MENTION: z
     .enum(["0", "1"])
     .default("1")
@@ -39,6 +41,8 @@ export interface AppConfig {
     accessToken: string;
     accountId: string;
     requireGroupMention: boolean;
+    privateUserIds: string[];
+    ignoredUserIds: string[];
   };
   codex: {
     executable: string;
@@ -65,6 +69,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       accessToken: parsed.NAPCAT_ACCESS_TOKEN,
       accountId: parsed.NAPCAT_ACCOUNT_ID,
       requireGroupMention: parsed.NAPCAT_GROUP_REQUIRE_MENTION,
+      privateUserIds: parseUserIds(parsed.NAPCAT_PRIVATE_USER_IDS),
+      ignoredUserIds: parseUserIds(parsed.NAPCAT_IGNORED_USER_IDS),
     },
     codex: {
       executable: parsed.FINALBOT_CODEX_BIN,
@@ -74,5 +80,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     fakeAgent: parsed.FINALBOT_FAKE_AGENT,
     maxConcurrentRuns: parsed.FINALBOT_MAX_CONCURRENT_RUNS,
   };
+}
+
+function parseUserIds(value: string): string[] {
+  return value
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => /^\d+$/.test(id));
 }
 
