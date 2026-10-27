@@ -1,11 +1,11 @@
 import { mkdir } from "node:fs/promises";
-import { Hono } from "hono";
-import { serveStatic } from "hono/bun";
-import { z } from "zod";
+import { OneBotAdapter } from "@finalbot/channel-onebot";
 import { nowIso } from "@finalbot/core";
 import { FinalBotDatabase } from "@finalbot/db";
 import type { HealthResponse, ServerEvent } from "@finalbot/protocol";
-import { OneBotAdapter } from "@finalbot/channel-onebot";
+import { Hono } from "hono";
+import { serveStatic } from "hono/bun";
+import { z } from "zod";
 import { loadConfig } from "./config";
 import { EventBus } from "./event-bus";
 import { RunService } from "./run-service";
@@ -195,8 +195,19 @@ app.get("/api/events", (c) => {
 });
 
 const webRoot = webAssetPath();
-app.use("/*", serveStatic({ root: webRoot }));
-app.get("*", serveStatic({ path: `${webRoot}/index.html` }));
+if (webRoot) {
+  app.use("/*", serveStatic({ root: webRoot }));
+  app.get("*", serveStatic({ path: `${webRoot}/index.html` }));
+} else {
+  const assets = embeddedWebAssets();
+  app.get("*", (c) => {
+    const pathname = c.req.path === "/" ? "/index.html" : c.req.path;
+    const asset = assets.get(pathname);
+    if (asset) return new Response(asset);
+    const index = assets.get("/index.html");
+    return index ? new Response(index) : c.notFound();
+  });
+}
 
 const server = Bun.serve({
   hostname: config.host,
@@ -231,7 +242,7 @@ function toRunSummary(run: ReturnType<FinalBotDatabase["getRun"]> & {}) {
   };
 }
 
-function webAssetPath(): string {
+function webAssetPath(): string | null {
   const candidates = [
     `${import.meta.dir}/../../web/dist`,
     `${import.meta.dir}/../web/dist`,
@@ -241,7 +252,21 @@ function webAssetPath(): string {
   for (const candidate of candidates) {
     if (Bun.file(`${candidate}/index.html`).size > 0) return candidate;
   }
-  return candidates[0] ?? `${process.cwd()}/apps/web/dist`;
+  return null;
+}
+
+function embeddedWebAssets(): Map<string, Blob> {
+  const assets = new Map<string, Blob>();
+  for (const asset of Bun.embeddedFiles) {
+    const name = embeddedFileName(asset).replace(/^dist\//, "");
+    assets.set(`/${name}`, asset);
+  }
+  return assets;
+}
+
+function embeddedFileName(asset: Blob): string {
+  const name = Reflect.get(asset, "name");
+  return typeof name === "string" ? name : "";
 }
 
 async function shutdown(signal: string): Promise<void> {
@@ -255,4 +280,3 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
-

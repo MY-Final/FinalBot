@@ -1,0 +1,10 @@
+{
+  "name": "@finalbot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.ts --compile --windows-hide-console --windows-title FinalBot --windows-description \"FinalBot desktop\" --asset ../web/dist --outfile release/finalbot-desktop.exe",
+    "dev": "bun --watch src/main.ts"
+  }
+}

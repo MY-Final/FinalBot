@@ -1,0 +1,10 @@
+.git
+.tmp
+.env
+.napcat.dev
+data
+dist
+node_modules
+coverage
+apps/web/dist
+apps/desktop/release

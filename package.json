@@ -6,6 +6,7 @@
   "workspaces": [
     "apps/server",
     "apps/web",
+    "apps/desktop",
     "packages/*"
   ],
   "scripts": {
@@ -14,10 +15,12 @@
     "build:web": "bun run --cwd apps/web build",
     "build:server": "bun build apps/server/src/index.ts --compile --outfile dist/finalbot",
     "build:windows": "bun run build:web && bun build apps/server/src/index.ts --compile --windows-hide-console --windows-title FinalBot --windows-description \"FinalBot personal assistant control plane\" --asset apps/web/dist --outfile dist/finalbot.exe",
+    "build:desktop": "bun run build:web && bun run --cwd apps/desktop build",
     "build": "bun run build:web && bun run build:server",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "check": "bun run typecheck && bun test",
+    "test": "bun test ./packages",
+    "check": "bun run typecheck && bun test ./packages",
+    "dev": "bun run --cwd apps/server dev",
     "format": "biome format --write .",
     "lint": "biome check ."
   },
@@ -31,4 +34,3 @@
     "vite": "7.3.1"
   }
 }
-

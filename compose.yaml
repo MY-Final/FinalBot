@@ -1,0 +1,18 @@
+services:
+  finalbot:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      FINALBOT_REPO_PATH: /workspaces/project
+      NAPCAT_WS_URL: ${NAPCAT_WS_URL:-}
+      NAPCAT_ACCESS_TOKEN: ${NAPCAT_ACCESS_TOKEN:-}
+      NAPCAT_ACCOUNT_ID: ${NAPCAT_ACCOUNT_ID:-}
+      FINALBOT_CODEX_BIN: codex
+    volumes:
+      - finalbot-data:/data
+      - ${FINALBOT_PROJECT_PATH:-./workspace}:/workspaces/project
+
+volumes:
+  finalbot-data:

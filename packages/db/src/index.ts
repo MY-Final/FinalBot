@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 import {
-  assertRunTransition,
-  createId,
-  nowIso,
   type ApprovalDecision,
+  assertRunTransition,
   type ChannelKind,
   type ConversationKind,
+  createId,
+  nowIso,
   type RunState,
 } from "@finalbot/core";
 
@@ -77,7 +77,13 @@ interface Row {
   [key: string]: unknown;
 }
 
-const ACTIVE_STATES: RunState[] = ["admitted", "running", "waiting_approval", "retrying", "interrupted"];
+const ACTIVE_STATES: RunState[] = [
+  "admitted",
+  "running",
+  "waiting_approval",
+  "retrying",
+  "interrupted",
+];
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string" || value.length === 0) {
@@ -441,20 +447,22 @@ export class FinalBotDatabase {
   markInboxDone(conversationId: string, ids: string[]): void {
     if (ids.length === 0) return;
     const now = nowIso();
-    const update = this.db.query("UPDATE inbox_items SET status = 'done' WHERE id = ?");
-    for (const id of ids) update.run(id);
-    const last = ids[ids.length - 1];
-    if (last) {
-      this.db
-        .query(
-          `INSERT INTO conversation_cursors (conversation_id, last_inbox_id, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(conversation_id) DO UPDATE SET
-             last_inbox_id = excluded.last_inbox_id,
-             updated_at = excluded.updated_at`,
-        )
-        .run(conversationId, last, now);
-    }
+    this.db.transaction(() => {
+      const update = this.db.query("UPDATE inbox_items SET status = 'done' WHERE id = ?");
+      for (const id of ids) update.run(id);
+      const last = ids[ids.length - 1];
+      if (last) {
+        this.db
+          .query(
+            `INSERT INTO conversation_cursors (conversation_id, last_inbox_id, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(conversation_id) DO UPDATE SET
+               last_inbox_id = excluded.last_inbox_id,
+               updated_at = excluded.updated_at`,
+          )
+          .run(conversationId, last, now);
+      }
+    })();
   }
 
   markInboxFailed(ids: string[]): void {
@@ -667,9 +675,7 @@ export class FinalBotDatabase {
           ? "cancelled"
           : "accepted";
     this.db
-      .query(
-        "UPDATE approval_requests SET status = ?, resolved_at = ? WHERE request_id = ?",
-      )
+      .query("UPDATE approval_requests SET status = ?, resolved_at = ? WHERE request_id = ?")
       .run(status, nowIso(), requestId);
     const updated = this.getApproval(requestId);
     if (!updated) throw new Error("Approval disappeared after update");
@@ -718,11 +724,22 @@ export class FinalBotDatabase {
           status: "interrupted",
           checkpoint: { previousState: run.state, reason: "process_restart" },
         });
+        this.expirePendingApprovals(run.id);
         const updated = this.getRun(run.id);
         if (updated) recovered.push(updated);
       }
     }
     return recovered;
+  }
+
+  private expirePendingApprovals(runId: string): void {
+    this.db
+      .query(
+        `UPDATE approval_requests
+         SET status = 'expired', resolved_at = ?
+         WHERE run_id = ? AND status = 'pending'`,
+      )
+      .run(nowIso(), runId);
   }
 
   enqueueOutbox(type: string, payload: unknown, runId: string | null = null): string {
@@ -753,4 +770,3 @@ export class FinalBotDatabase {
       .run(nowIso(), id);
   }
 }
-
