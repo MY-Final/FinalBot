@@ -17,6 +17,9 @@ describe("run state machine", () => {
     expect(() => assertRunTransition("succeeded", "running")).toThrow(
       "Invalid run transition: succeeded -> running",
     );
+    expect(isTerminalRunState("interrupted")).toBe(true);
+    expect(() => assertRunTransition("interrupted", "running")).toThrow(
+      "Invalid run transition: interrupted -> running",
+    );
   });
 });
-

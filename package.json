@@ -18,8 +18,8 @@
     "build:desktop": "bun run build:web && bun run --cwd apps/desktop build",
     "build": "bun run build:web && bun run build:server",
     "typecheck": "tsc --noEmit",
-    "test": "bun test ./packages",
-    "check": "bun run typecheck && bun test ./packages",
+    "test": "bun test ./packages ./apps/server",
+    "check": "bun run typecheck && bun test ./packages ./apps/server",
     "dev": "bun run --cwd apps/server dev",
     "format": "biome format --write .",
     "lint": "biome check ."

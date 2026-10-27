@@ -1,4 +1,3 @@
-import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ApprovalSummary,
   HealthResponse,
@@ -6,9 +5,10 @@ import type {
   RunSummary,
   ServerEvent,
 } from "@finalbot/protocol";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, subscribeEvents } from "./api";
 
-const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
 const STATE_LABEL: Record<string, string> = {
   admitted: "已接收",
@@ -50,7 +50,10 @@ export function App() {
   const outputRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
-    void api.health().then(setHealth).catch((cause: unknown) => setError(String(cause)));
+    void api
+      .health()
+      .then(setHealth)
+      .catch((cause: unknown) => setError(String(cause)));
     void api
       .runs()
       .then((items) => {
@@ -61,10 +64,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    return subscribeEvents(
-      (event) => applyEvent(event),
-      setConnected,
-    );
+    return subscribeEvents((event) => applyEvent(event), setConnected);
   }, [selectedId]);
 
   useEffect(() => {
@@ -119,10 +119,7 @@ export function App() {
       setLiveOutput((current) => `${current}${event.text}`);
       return;
     }
-    if (
-      event.type === "approval.requested" ||
-      event.type === "approval.resolved"
-    ) {
+    if (event.type === "approval.requested" || event.type === "approval.resolved") {
       if (event.approval.runId !== selectedId) return;
       setDetail((current) => {
         if (!current) return current;
@@ -222,8 +219,15 @@ export function App() {
               rows={4}
             />
             <div className="composer-footer">
-              <span><kbd>Ctrl</kbd> <b>+</b> <kbd>Enter</kbd></span>
-              <button className="dispatch-button" onClick={() => void submit()} disabled={submitting}>
+              <span>
+                <kbd>Ctrl</kbd> <b>+</b> <kbd>Enter</kbd>
+              </span>
+              <button
+                type="button"
+                className="dispatch-button"
+                onClick={() => void submit()}
+                disabled={submitting}
+              >
                 {submitting ? "派发中" : "开始派发"}
                 <span aria-hidden="true">↗</span>
               </button>
@@ -240,6 +244,7 @@ export function App() {
             ) : (
               runs.map((run, index) => (
                 <button
+                  type="button"
                   key={run.id}
                   className={`run-card ${run.id === selectedId ? "is-selected" : ""}`}
                   onClick={() => setSelectedId(run.id)}
@@ -292,7 +297,7 @@ export function App() {
                     {STATE_LABEL[selected.state] ?? selected.state}
                   </span>
                   {!TERMINAL.has(selected.state) && (
-                    <button className="quiet-button" onClick={() => void interrupt()}>
+                    <button type="button" className="quiet-button" onClick={() => void interrupt()}>
                       中断任务
                     </button>
                   )}
@@ -321,7 +326,9 @@ export function App() {
                     <div className="error-banner">
                       <strong>连接错误</strong>
                       <span>{error}</span>
-                      <button onClick={() => setError(null)}>关闭</button>
+                      <button type="button" onClick={() => setError(null)}>
+                        关闭
+                      </button>
                     </div>
                   )}
                 </div>
@@ -330,10 +337,24 @@ export function App() {
                   <div className="inspector-section">
                     <p className="eyebrow">Run control</p>
                     <dl className="meta-list">
-                      <div><dt>状态</dt><dd>{STATE_LABEL[selected.state] ?? selected.state}</dd></div>
-                      <div><dt>Agent</dt><dd>{selected.agent}</dd></div>
-                      <div><dt>开始</dt><dd>{selected.startedAt ? timeAgo(selected.startedAt) : "等待"}</dd></div>
-                      <div><dt>线程</dt><dd title={selected.nativeThreadId ?? ""}>{selected.nativeThreadId?.slice(-12) ?? "待绑定"}</dd></div>
+                      <div>
+                        <dt>状态</dt>
+                        <dd>{STATE_LABEL[selected.state] ?? selected.state}</dd>
+                      </div>
+                      <div>
+                        <dt>Agent</dt>
+                        <dd>{selected.agent}</dd>
+                      </div>
+                      <div>
+                        <dt>开始</dt>
+                        <dd>{selected.startedAt ? timeAgo(selected.startedAt) : "等待"}</dd>
+                      </div>
+                      <div>
+                        <dt>线程</dt>
+                        <dd title={selected.nativeThreadId ?? ""}>
+                          {selected.nativeThreadId?.slice(-12) ?? "待绑定"}
+                        </dd>
+                      </div>
                     </dl>
                   </div>
 
@@ -372,7 +393,9 @@ export function App() {
                           <span className={`phase-mark phase-${phase.status}`} />
                           <div>
                             <strong>{phase.phase}</strong>
-                            <small>{phase.status} / attempt {phase.attempt}</small>
+                            <small>
+                              {phase.status} / attempt {phase.attempt}
+                            </small>
                           </div>
                         </div>
                       ))
@@ -407,15 +430,33 @@ function ApprovalCard({
       <strong>{approval.title}</strong>
       <p>{approval.detail}</p>
       <div className="approval-actions">
-        <button className="approve" onClick={() => void onResolve(approval.requestId, "accept")}>
+        <button
+          type="button"
+          className="approve"
+          onClick={() => void onResolve(approval.requestId, "accept")}
+        >
           允许本次
         </button>
-        <button onClick={() => void onResolve(approval.requestId, "decline")}>拒绝</button>
-        <button className="cancel-action" onClick={() => void onResolve(approval.requestId, "cancel")}>
+        {approval.canAcceptForSession && (
+          <button
+            type="button"
+            className="approve"
+            onClick={() => void onResolve(approval.requestId, "accept_session")}
+          >
+            本会话允许
+          </button>
+        )}
+        <button type="button" onClick={() => void onResolve(approval.requestId, "decline")}>
+          拒绝
+        </button>
+        <button
+          type="button"
+          className="cancel-action"
+          onClick={() => void onResolve(approval.requestId, "cancel")}
+        >
           取消
         </button>
       </div>
     </div>
   );
 }
-

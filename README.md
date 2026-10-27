@@ -62,6 +62,23 @@ traffic. Private messages only work for accounts listed in `NAPCAT_PRIVATE_USER_
 empty list rejects all private messages. `NAPCAT_IGNORED_USER_IDS` is a global denylist for
 known bot accounts and other senders that must never trigger an agent run.
 
+## IM Commands
+
+Commands are handled immediately and never become agent prompts or Inbox items:
+
+```text
+/help
+/status
+/approve [approval-id]
+/approve_session [approval-id]
+/deny [approval-id]
+/cancel
+```
+
+`/approve`, `/approve_session`, and `/deny` operate on the conversation's oldest pending
+approval when no ID is supplied. Approval IDs are shown in the notification. Only the sender
+who started a run may approve, deny, inspect, or interrupt it.
+
 ## Commands
 
 ```powershell

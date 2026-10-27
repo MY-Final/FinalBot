@@ -4,6 +4,7 @@ export interface RunSummary {
   id: string;
   state: RunState;
   prompt: string;
+  requestedBy: string | null;
   agent: string;
   output: string;
   error: string | null;
@@ -23,6 +24,7 @@ export interface ApprovalSummary {
   kind: string;
   title: string;
   detail: string;
+  canAcceptForSession: boolean;
   status: "pending" | "accepted" | "declined" | "cancelled" | "expired";
   createdAt: string;
   resolvedAt: string | null;
@@ -93,4 +95,3 @@ export interface ApiError {
   error: string;
   message: string;
 }
-

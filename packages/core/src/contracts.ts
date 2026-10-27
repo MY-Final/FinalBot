@@ -11,7 +11,7 @@ export const RUN_STATES = [
 
 export type RunState = (typeof RUN_STATES)[number];
 
-export const TERMINAL_RUN_STATES = ["succeeded", "failed", "cancelled"] as const;
+export const TERMINAL_RUN_STATES = ["succeeded", "failed", "cancelled", "interrupted"] as const;
 export type TerminalRunState = (typeof TERMINAL_RUN_STATES)[number];
 
 export type ChannelKind = "web" | "onebot";
@@ -94,4 +94,3 @@ export interface AgentSink {
 export interface AgentAdapter {
   start(input: AgentRunInput, sink: AgentSink): AgentRunHandle;
 }
-

@@ -27,6 +27,10 @@ export class ApprovalBroker {
     return true;
   }
 
+  cancel(requestId: string): boolean {
+    return this.resolve(requestId, { action: "cancel" });
+  }
+
   cancelAll(): void {
     for (const [requestId, waiter] of this.waiters) {
       clearTimeout(waiter.timer);
@@ -35,4 +39,3 @@ export class ApprovalBroker {
     }
   }
 }
-

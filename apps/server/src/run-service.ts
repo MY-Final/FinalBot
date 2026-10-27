@@ -1,30 +1,43 @@
+import { CodexAgentAdapter } from "@finalbot/agent-codex";
 import type {
   AgentAdapter,
   AgentEvent,
   AgentRunHandle,
   ApprovalDecision,
   InboundMessage,
+  OneBotReplyTarget,
   PendingApproval,
+  WebReplyTarget,
 } from "@finalbot/core";
-import { createId, nowIso, type RunState } from "@finalbot/core";
-import { CodexAgentAdapter } from "@finalbot/agent-codex";
-import type {
-  ApprovalRecord,
-  FinalBotDatabase,
-  RunRecord,
-} from "@finalbot/db";
+import {
+  createId,
+  type ImCommand,
+  isTerminalRunState,
+  nowIso,
+  parseImCommand,
+  type RunState,
+} from "@finalbot/core";
+import type { ApprovalRecord, FinalBotDatabase, RunRecord } from "@finalbot/db";
 import { GitWorkspaceManager } from "@finalbot/workspace-git";
-import type { AppConfig } from "./config";
 import { ApprovalBroker } from "./approval-broker";
-import { EventBus } from "./event-bus";
+import type { AppConfig } from "./config";
+import type { EventBus } from "./event-bus";
 
-type ReplySender = (target: Record<string, unknown>, text: string) => Promise<void>;
+type ReplyTarget = OneBotReplyTarget | WebReplyTarget;
+type ReplySender = (target: ReplyTarget, text: string) => Promise<void>;
+
+interface ReplyContext {
+  conversationId: string;
+  senderId: string;
+  replyTarget: ReplyTarget | null;
+}
 
 export class RunService {
   private readonly agent: AgentAdapter & { close?: () => Promise<void> };
   private readonly approvals = new ApprovalBroker();
   private readonly activeHandles = new Map<string, AgentRunHandle>();
   private readonly activeConversations = new Set<string>();
+  private readonly interruptRequested = new Set<string>();
   private readonly workspace: GitWorkspaceManager | null;
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private replySender: ReplySender | null = null;
@@ -33,11 +46,16 @@ export class RunService {
     private readonly db: FinalBotDatabase,
     private readonly bus: EventBus,
     private readonly config: AppConfig,
+    agent?: AgentAdapter & { close?: () => Promise<void> },
   ) {
-    this.agent = config.fakeAgent ? new DemoAgentAdapter() : new CodexAgentAdapter({
-      executable: config.codex.executable,
-      ...(config.codex.model ? { model: config.codex.model } : {}),
-    });
+    this.agent =
+      agent ??
+      (config.fakeAgent
+        ? new DemoAgentAdapter()
+        : new CodexAgentAdapter({
+            executable: config.codex.executable,
+            ...(config.codex.model ? { model: config.codex.model } : {}),
+          }));
     this.workspace = config.repositoryPath
       ? new GitWorkspaceManager(config.repositoryPath, config.worktreesDir)
       : null;
@@ -59,6 +77,12 @@ export class RunService {
       conversationKind: message.conversationKind,
       metadata: { replyTarget: message.replyTarget },
     });
+
+    const command = parseImCommand(message.text);
+    if (command) {
+      await this.handleCommand(message, command);
+      return;
+    }
     const admitted = this.db.admitInbound({
       conversationId: conversation.id,
       externalMessageId: message.externalMessageId,
@@ -69,6 +93,195 @@ export class RunService {
     });
     if (admitted.duplicate) return;
     this.scheduleConversation(conversation.id);
+  }
+
+  private async handleCommand(message: InboundMessage, command: ImCommand): Promise<void> {
+    const conversation = this.db.getConversationByExternal(
+      message.channel,
+      message.accountId,
+      message.externalConversationId,
+    );
+    if (!conversation) {
+      await this.reply(message.replyTarget, "无法找到当前会话。");
+      return;
+    }
+    const context: ReplyContext = {
+      conversationId: conversation.id,
+      senderId: message.senderId,
+      replyTarget: message.replyTarget,
+    };
+
+    if (command.kind === "help") {
+      await this.reply(
+        message.replyTarget,
+        [
+          "FinalBot 指令",
+          "/status - 查看当前任务",
+          "/approve [审批ID] - 允许本次",
+          "/approve_session [审批ID] - 本会话允许",
+          "/deny [审批ID] - 拒绝",
+          "/cancel - 中断当前任务",
+        ].join("\n"),
+      );
+      return;
+    }
+    if (command.kind === "unknown") {
+      await this.reply(
+        message.replyTarget,
+        `无法识别指令：${command.raw}\n发送 /help 查看可用指令。`,
+      );
+      return;
+    }
+    if (command.kind === "status") {
+      await this.sendStatus(context);
+      return;
+    }
+    if (command.kind === "cancel") {
+      await this.cancelForConversation(context);
+      return;
+    }
+    const requestId = "requestId" in command ? command.requestId : undefined;
+
+    const run = this.findRunForCommand(context, requestId);
+    if (!run) {
+      await this.reply(message.replyTarget, "当前会话没有可操作的任务。");
+      return;
+    }
+    const approval = this.findApprovalForCommand(run.id, requestId);
+    if (!approval) {
+      await this.reply(message.replyTarget, "没有找到待审批操作。");
+      return;
+    }
+    if (command.kind === "approve_session" && !approval.canAcceptForSession) {
+      await this.reply(message.replyTarget, "该操作不支持本会话放行，请使用 /approve。");
+      return;
+    }
+    const decision: ApprovalDecision =
+      command.kind === "deny"
+        ? { action: "decline" }
+        : command.kind === "approve_session"
+          ? { action: "accept_session" }
+          : { action: "accept" };
+    try {
+      this.assertApprovalOwner(approval, context.senderId);
+      this.resolveApproval(approval.requestId, decision);
+      const verb =
+        command.kind === "deny"
+          ? "已拒绝"
+          : command.kind === "approve_session"
+            ? "本会话已允许"
+            : "已允许";
+      await this.reply(
+        message.replyTarget,
+        `${verb}：${approval.title}\n审批 ID：${approval.requestId}`,
+      );
+    } catch (error) {
+      await this.reply(
+        message.replyTarget,
+        `审批操作失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async sendStatus(context: ReplyContext): Promise<void> {
+    const run = this.db.getLatestRun(context.conversationId);
+    if (!run) {
+      await this.reply(context.replyTarget, "当前会话还没有任务。");
+      return;
+    }
+    try {
+      this.assertRunOwner(run, context.senderId);
+    } catch {
+      await this.reply(context.replyTarget, "当前任务不属于当前发送者。");
+      return;
+    }
+    const approvals = this.db.listPendingApprovals(run.id);
+    const lines = [
+      `任务：${run.id}`,
+      `状态：${run.state}`,
+      run.workspacePath ? `工作区：${run.workspacePath}` : null,
+      run.error ? `错误：${run.error}` : null,
+      approvals.length > 0
+        ? `待审批：${approvals
+            .map((approval) => `${approval.title} (${approval.requestId})`)
+            .join(" / ")}`
+        : "待审批：无",
+    ].filter((line): line is string => line !== null);
+    await this.reply(context.replyTarget, lines.join("\n"));
+  }
+
+  private async cancelForConversation(context: ReplyContext): Promise<void> {
+    const run = this.db.getLatestRun(context.conversationId);
+    if (!run || isTerminalRunState(run.state)) {
+      await this.reply(context.replyTarget, "当前没有可中断的任务。");
+      return;
+    }
+    try {
+      this.assertRunOwner(run, context.senderId);
+      await this.interrupt(run.id);
+      await this.reply(context.replyTarget, `已请求中断任务：${run.id}`);
+    } catch (error) {
+      await this.reply(
+        context.replyTarget,
+        `中断失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private findRunForCommand(context: ReplyContext, requestId?: string): RunRecord | null {
+    try {
+      if (requestId) {
+        const approval = this.db.getApproval(requestId);
+        if (!approval) return null;
+        const run = this.db.getRun(approval.runId);
+        if (!run || run.conversationId !== context.conversationId) return null;
+        this.assertRunOwner(run, context.senderId);
+        return run;
+      }
+      const run = this.db.getLatestRun(context.conversationId);
+      if (!run) return null;
+      this.assertRunOwner(run, context.senderId);
+      return run;
+    } catch {
+      return null;
+    }
+  }
+
+  private findApprovalForCommand(runId: string, requestId?: string): ApprovalRecord | null {
+    if (requestId) {
+      const approval = this.db.getApproval(requestId);
+      return approval?.runId === runId && approval.status === "pending" ? approval : null;
+    }
+    return this.db.listPendingApprovals(runId)[0] ?? null;
+  }
+
+  private assertRunOwner(run: RunRecord, senderId: string): void {
+    if (run.requestedBy && run.requestedBy !== senderId) {
+      throw new Error("该任务不属于当前发送者");
+    }
+  }
+
+  private assertApprovalOwner(approval: ApprovalRecord, senderId: string): void {
+    const run = this.db.getRun(approval.runId);
+    if (!run) throw new Error("审批对应的任务不存在");
+    this.assertRunOwner(run, senderId);
+  }
+
+  private async reply(target: ReplyTarget | null, text: string): Promise<void> {
+    if (!target) return;
+    if (!this.replySender) return;
+    try {
+      await this.replySender(target, text);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.bus.publish({
+        type: "system",
+        level: "error",
+        message: `Failed to send reply: ${detail}`,
+        at: nowIso(),
+      });
+      console.error(`[finalbot] failed to send reply: ${detail}`);
+    }
   }
 
   private scheduleConversation(conversationId: string): void {
@@ -98,11 +311,12 @@ export class RunService {
     const conversation = this.db.getConversation(conversationId);
     const replyTarget =
       conversation && typeof conversation.metadata.replyTarget === "object"
-        ? (conversation.metadata.replyTarget as Record<string, unknown>)
+        ? (conversation.metadata.replyTarget as ReplyTarget)
         : null;
     const run = this.db.createRun({
       conversationId,
       prompt,
+      requestedBy: items.at(-1)?.senderId ?? null,
       agent: "codex",
       replyTarget,
     });
@@ -119,25 +333,14 @@ export class RunService {
       } else {
         this.db.markInboxFailed(ids);
       }
-      if (replyTarget && this.replySender) {
+      if (replyTarget) {
         const message =
           result.state === "succeeded"
             ? result.output.trim() || "任务已完成。"
-            : `任务${result.state === "interrupted" ? "已中断" : "失败"}：${
-                result.error ?? "未提供错误信息"
-              }`;
-        try {
-          await this.replySender(replyTarget, message);
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          this.bus.publish({
-            type: "system",
-            level: "error",
-            message: `Failed to send reply: ${detail}`,
-            at: nowIso(),
-          });
-          console.error(`[finalbot] failed to send reply for ${run.id}: ${detail}`);
-        }
+            : result.state === "interrupted"
+              ? "任务已中断。"
+              : `任务失败：${result.error ?? "未提供错误信息"}`;
+        await this.reply(replyTarget, message);
       }
     } finally {
       this.activeConversations.delete(conversationId);
@@ -162,6 +365,7 @@ export class RunService {
     const run = this.db.createRun({
       conversationId: conversation.id,
       prompt,
+      requestedBy: "web:local",
       agent: "codex",
       replyTarget: { kind: "web" },
     });
@@ -171,6 +375,9 @@ export class RunService {
   }
 
   private async executeRun(run: RunRecord): Promise<RunRecord> {
+    if (this.interruptRequested.has(run.id)) {
+      return this.endBeforeStart(run.id);
+    }
     if (!this.workspace) {
       const failed = this.db.updateRun(run.id, {
         state: "failed",
@@ -202,6 +409,9 @@ export class RunService {
         status: "done",
         checkpoint: { path: worktree.path, baseCommit: worktree.baseCommit },
       });
+      if (this.interruptRequested.has(run.id)) {
+        return this.endBeforeStart(run.id);
+      }
       this.db.putPhase({
         runId: run.id,
         phase: "agent.start",
@@ -224,6 +434,9 @@ export class RunService {
         },
       );
       this.activeHandles.set(run.id, handle);
+      if (this.interruptRequested.has(run.id)) {
+        await handle.interrupt();
+      }
       const result = await handle.result;
 
       const state: RunState =
@@ -234,13 +447,17 @@ export class RunService {
             : result.status === "cancelled"
               ? "cancelled"
               : "failed";
-      const terminal = state === "succeeded" || state === "failed" || state === "cancelled";
+      const ended =
+        state === "succeeded" ||
+        state === "failed" ||
+        state === "cancelled" ||
+        state === "interrupted";
       current = this.db.updateRun(run.id, {
         state,
         nativeThreadId: result.nativeThreadId || current.nativeThreadId,
         nativeTurnId: result.nativeTurnId || current.nativeTurnId,
         ...(result.error ? { error: result.error } : {}),
-        ...(terminal ? { finishedAt: nowIso() } : {}),
+        ...(ended ? { finishedAt: nowIso() } : {}),
       });
       this.db.putPhase({
         runId: run.id,
@@ -270,7 +487,27 @@ export class RunService {
       return current;
     } finally {
       this.activeHandles.delete(run.id);
+      this.interruptRequested.delete(run.id);
     }
+  }
+
+  private endBeforeStart(runId: string): RunRecord {
+    this.interruptRequested.delete(runId);
+    const current = this.db.getRun(runId);
+    if (!current) throw new Error(`Run not found: ${runId}`);
+    this.db.putPhase({
+      runId,
+      phase: "agent",
+      status: "interrupted",
+      checkpoint: { reason: "interrupted_before_agent_start" },
+    });
+    if (isTerminalRunState(current.state)) return current;
+    const stopped = this.db.updateRun(runId, {
+      state: current.state === "admitted" ? "cancelled" : "interrupted",
+      finishedAt: nowIso(),
+    });
+    this.publishRun(stopped);
+    return stopped;
   }
 
   private async handleAgentEvent(runId: string, event: AgentEvent): Promise<void> {
@@ -311,27 +548,56 @@ export class RunService {
     runId: string,
     request: Omit<PendingApproval, "runId">,
   ): Promise<ApprovalDecision> {
+    const requestId = createId("approval");
     const record = this.db.createApproval({
-      requestId: request.requestId,
+      requestId,
       runId,
       kind: request.kind,
       title: request.title,
       detail: request.detail,
+      canAcceptForSession: request.canAcceptForSession,
       payload: request.payload,
     });
     const run = this.db.getRun(runId);
+    if (run?.state !== "running") {
+      const cancelled = this.db.resolveApproval(requestId, { action: "cancel" });
+      this.publishApproval(cancelled, "approval.resolved");
+      return { action: "cancel" };
+    }
     if (run?.state === "running") {
       const waiting = this.db.updateRun(runId, { state: "waiting_approval" });
       this.publishRun(waiting);
     }
+    const decisionPromise = this.approvals.wait(requestId);
     this.publishApproval(record, "approval.requested");
-    const decision = await this.approvals.wait(request.requestId);
-    const resolved = this.db.resolveApproval(request.requestId, decision);
-    this.publishApproval(resolved, "approval.resolved");
+    if (run.replyTarget) {
+      await this.reply(run.replyTarget, formatApprovalNotice(record));
+    }
+    const decision = await decisionPromise;
+    const resolved = this.db.resolveApproval(requestId, decision);
+    if (decision.action !== "cancel") {
+      this.publishApproval(resolved, "approval.resolved");
+    }
+    if (run.replyTarget && decision.action !== "cancel") {
+      await this.reply(run.replyTarget, `审批已处理：${record.title} -> ${decision.action}`);
+    }
     const after = this.db.getRun(runId);
     if (after?.state === "waiting_approval") {
       const resumed = this.db.updateRun(runId, { state: "running" });
       this.publishRun(resumed);
+    }
+    if (decision.action === "cancel" && after?.state !== "waiting_approval") {
+      const interrupted = this.db.getRun(runId);
+      if (interrupted && (interrupted.state === "running" || interrupted.state === "retrying")) {
+        const next = this.db.updateRun(runId, {
+          state: "interrupted",
+          finishedAt: nowIso(),
+        });
+        this.publishRun(next);
+      }
+    }
+    if (decision.action === "cancel") {
+      this.publishApproval(resolved, "approval.resolved");
     }
     return decision;
   }
@@ -341,7 +607,10 @@ export class RunService {
     if (!record) throw new Error(`Approval not found: ${requestId}`);
     if (record.status !== "pending") return record;
     const resolved = this.db.resolveApproval(requestId, decision);
-    this.approvals.resolve(requestId, decision);
+    if (this.approvals.resolve(requestId, decision)) {
+      // The waiting requestApproval callback owns the resolved event.
+      return resolved;
+    }
     this.publishApproval(resolved, "approval.resolved");
     return resolved;
   }
@@ -349,14 +618,25 @@ export class RunService {
   async interrupt(runId: string): Promise<void> {
     const run = this.db.getRun(runId);
     if (!run) throw new Error(`Run not found: ${runId}`);
+    if (isTerminalRunState(run.state)) return;
+    this.interruptRequested.add(runId);
+    const pending = this.db.listPendingApprovals(runId);
+    for (const approval of pending) {
+      this.resolveApproval(approval.requestId, { action: "cancel" });
+    }
     const handle = this.activeHandles.get(runId);
     if (handle) {
       await handle.interrupt();
       return;
     }
-    if (run.state === "admitted" || run.state === "waiting_approval" || run.state === "retrying") {
+    if (
+      run.state === "admitted" ||
+      run.state === "running" ||
+      run.state === "waiting_approval" ||
+      run.state === "retrying"
+    ) {
       const updated = this.db.updateRun(runId, {
-        state: "cancelled",
+        state: run.state === "admitted" ? "cancelled" : "interrupted",
         finishedAt: nowIso(),
       });
       this.publishRun(updated);
@@ -370,6 +650,7 @@ export class RunService {
         id: run.id,
         state: run.state,
         prompt: run.prompt,
+        requestedBy: run.requestedBy,
         agent: run.agent,
         output: run.output,
         error: run.error,
@@ -398,6 +679,7 @@ export class RunService {
         kind: approval.kind,
         title: approval.title,
         detail: approval.detail,
+        canAcceptForSession: approval.canAcceptForSession,
         status: approval.status,
         createdAt: approval.createdAt,
         resolvedAt: approval.resolvedAt,
@@ -421,6 +703,28 @@ export class RunService {
 
 export function createRunId(): string {
   return createId("run");
+}
+
+function formatApprovalNotice(approval: ApprovalRecord): string {
+  const lines = [
+    "需要审批",
+    `任务：${approval.runId}`,
+    `类型：${approval.kind}`,
+    `事项：${approval.title}`,
+    `详情：${truncate(approval.detail, 900)}`,
+    `ID：${approval.requestId}`,
+    "",
+    "/approve - 允许本次",
+    ...(approval.canAcceptForSession ? ["/approve_session - 本会话允许"] : []),
+    "/deny - 拒绝",
+    "/cancel - 中断任务",
+  ];
+  return lines.join("\n");
+}
+
+function truncate(value: string, max: number): string {
+  const compact = value.trim();
+  return compact.length > max ? `${compact.slice(0, max)}...` : compact;
 }
 
 class DemoAgentAdapter implements AgentAdapter {
@@ -455,4 +759,3 @@ class DemoAgentAdapter implements AgentAdapter {
     };
   }
 }
-

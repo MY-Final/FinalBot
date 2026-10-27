@@ -6,7 +6,9 @@ import {
   type ConversationKind,
   createId,
   nowIso,
+  type OneBotReplyTarget,
   type RunState,
+  type WebReplyTarget,
 } from "@finalbot/core";
 
 export interface ConversationRecord {
@@ -37,6 +39,7 @@ export interface RunRecord {
   id: string;
   conversationId: string;
   prompt: string;
+  requestedBy: string | null;
   state: RunState;
   agent: string;
   nativeThreadId: string | null;
@@ -44,7 +47,7 @@ export interface RunRecord {
   workspacePath: string | null;
   output: string;
   error: string | null;
-  replyTarget: Record<string, unknown> | null;
+  replyTarget: OneBotReplyTarget | WebReplyTarget | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -67,6 +70,7 @@ export interface ApprovalRecord {
   kind: string;
   title: string;
   detail: string;
+  canAcceptForSession: boolean;
   payload: unknown;
   status: "pending" | "accepted" | "declined" | "cancelled" | "expired";
   createdAt: string;
@@ -77,13 +81,7 @@ interface Row {
   [key: string]: unknown;
 }
 
-const ACTIVE_STATES: RunState[] = [
-  "admitted",
-  "running",
-  "waiting_approval",
-  "retrying",
-  "interrupted",
-];
+const ACTIVE_STATES: RunState[] = ["admitted", "running", "waiting_approval", "retrying"];
 
 function parseJson<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string" || value.length === 0) {
@@ -137,6 +135,7 @@ function mapRun(row: Row): RunRecord {
     id: asString(row.id),
     conversationId: asString(row.conversation_id),
     prompt: asString(row.prompt),
+    requestedBy: asNullableString(row.requested_by),
     state: asString(row.state) as RunState,
     agent: asString(row.agent),
     nativeThreadId: asNullableString(row.native_thread_id),
@@ -144,7 +143,7 @@ function mapRun(row: Row): RunRecord {
     workspacePath: asNullableString(row.workspace_path),
     output: asString(row.output),
     error: asNullableString(row.error),
-    replyTarget: parseJson<Record<string, unknown> | null>(row.reply_target_json, null),
+    replyTarget: parseJson<OneBotReplyTarget | WebReplyTarget | null>(row.reply_target_json, null),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
     startedAt: asNullableString(row.started_at),
@@ -171,6 +170,7 @@ function mapApproval(row: Row): ApprovalRecord {
     kind: asString(row.kind),
     title: asString(row.title),
     detail: asString(row.detail),
+    canAcceptForSession: Number(row.can_accept_for_session ?? 0) === 1,
     payload: parseJson<unknown>(row.payload_json, null),
     status: asString(row.status) as ApprovalRecord["status"],
     createdAt: asString(row.created_at),
@@ -227,6 +227,7 @@ export class FinalBotDatabase {
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         prompt TEXT NOT NULL,
+        requested_by TEXT,
         state TEXT NOT NULL,
         agent TEXT NOT NULL,
         native_thread_id TEXT,
@@ -258,6 +259,7 @@ export class FinalBotDatabase {
         kind TEXT NOT NULL,
         title TEXT NOT NULL,
         detail TEXT NOT NULL,
+        can_accept_for_session INTEGER NOT NULL DEFAULT 0,
         payload_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL,
@@ -285,6 +287,18 @@ export class FinalBotDatabase {
       CREATE INDEX IF NOT EXISTS idx_outbox_status
         ON outbox_events(status, created_at);
     `);
+    this.ensureColumn("runs", "requested_by", "TEXT");
+    this.ensureColumn("approval_requests", "can_accept_for_session", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  private ensureColumn(
+    table: "runs" | "approval_requests",
+    column: string,
+    definition: string,
+  ): void {
+    const rows = this.db.query(`PRAGMA table_info(${table})`).all() as Row[];
+    if (rows.some((row) => asString(row.name) === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   close(): void {
@@ -378,9 +392,7 @@ export class FinalBotDatabase {
     return row ? mapConversation(row) : null;
   }
 
-  getLatestConversationSession(
-    conversationId: string,
-  ): { nativeThreadId: string | null } | null {
+  getLatestConversationSession(conversationId: string): { nativeThreadId: string | null } | null {
     const row = this.db
       .query(
         `SELECT native_thread_id FROM runs
@@ -487,14 +499,16 @@ export class FinalBotDatabase {
   createRun(input: {
     conversationId: string;
     prompt: string;
+    requestedBy?: string | null;
     agent: string;
-    replyTarget?: Record<string, unknown> | null;
+    replyTarget?: OneBotReplyTarget | WebReplyTarget | null;
   }): RunRecord {
     const now = nowIso();
     const record: RunRecord = {
       id: createId("run"),
       conversationId: input.conversationId,
       prompt: input.prompt,
+      requestedBy: input.requestedBy ?? null,
       state: "admitted",
       agent: input.agent,
       nativeThreadId: null,
@@ -511,14 +525,15 @@ export class FinalBotDatabase {
     this.db
       .query(
         `INSERT INTO runs
-          (id, conversation_id, prompt, state, agent, native_thread_id, native_turn_id,
+          (id, conversation_id, prompt, requested_by, state, agent, native_thread_id, native_turn_id,
            workspace_path, output, error, reply_target_json, created_at, updated_at, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, '', NULL, ?, ?, ?, NULL, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '', NULL, ?, ?, ?, NULL, NULL)`,
       )
       .run(
         record.id,
         record.conversationId,
         record.prompt,
+        record.requestedBy,
         record.state,
         record.agent,
         record.replyTarget ? JSON.stringify(record.replyTarget) : null,
@@ -538,6 +553,17 @@ export class FinalBotDatabase {
       .query("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?")
       .all(Math.max(1, Math.min(limit, 200))) as Row[];
     return rows.map(mapRun);
+  }
+
+  getLatestRun(conversationId: string): RunRecord | null {
+    const row = this.db
+      .query(
+        `SELECT * FROM runs
+         WHERE conversation_id = ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(conversationId) as Row | null;
+    return row ? mapRun(row) : null;
   }
 
   updateRun(
@@ -637,14 +663,15 @@ export class FinalBotDatabase {
     kind: string;
     title: string;
     detail: string;
+    canAcceptForSession: boolean;
     payload: unknown;
   }): ApprovalRecord {
     const now = nowIso();
     this.db
       .query(
         `INSERT INTO approval_requests
-          (request_id, run_id, kind, title, detail, payload_json, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+          (request_id, run_id, kind, title, detail, can_accept_for_session, payload_json, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
          ON CONFLICT(request_id) DO NOTHING`,
       )
       .run(
@@ -653,6 +680,7 @@ export class FinalBotDatabase {
         input.kind,
         input.title,
         input.detail,
+        input.canAcceptForSession ? 1 : 0,
         JSON.stringify(input.payload),
         now,
       );
@@ -673,6 +701,17 @@ export class FinalBotDatabase {
   listApprovals(runId: string): ApprovalRecord[] {
     const rows = this.db
       .query("SELECT * FROM approval_requests WHERE run_id = ? ORDER BY created_at ASC")
+      .all(runId) as Row[];
+    return rows.map(mapApproval);
+  }
+
+  listPendingApprovals(runId: string): ApprovalRecord[] {
+    const rows = this.db
+      .query(
+        `SELECT * FROM approval_requests
+         WHERE run_id = ? AND status = 'pending'
+         ORDER BY created_at ASC`,
+      )
       .all(runId) as Row[];
     return rows.map(mapApproval);
   }

@@ -2,17 +2,10 @@ import type { RunState } from "./contracts";
 
 const TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   admitted: ["running", "cancelled", "failed"],
-  running: [
-    "waiting_approval",
-    "retrying",
-    "interrupted",
-    "succeeded",
-    "failed",
-    "cancelled",
-  ],
+  running: ["waiting_approval", "retrying", "interrupted", "succeeded", "failed", "cancelled"],
   waiting_approval: ["running", "interrupted", "failed", "cancelled"],
   retrying: ["running", "interrupted", "failed", "cancelled"],
-  interrupted: ["running", "failed", "cancelled"],
+  interrupted: [],
   succeeded: [],
   failed: [],
   cancelled: [],
@@ -41,4 +34,3 @@ export function assertRunTransition(from: RunState, to: RunState): void {
 export function isTerminalRunState(state: RunState): boolean {
   return TRANSITIONS[state].length === 0;
 }
-
