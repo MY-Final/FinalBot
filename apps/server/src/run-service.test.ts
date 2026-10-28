@@ -181,13 +181,21 @@ describe("IM approvals and interruption", () => {
   test("a cancel that arrives before agent start prevents workspace execution leakage", async () => {
     const env = await setup();
     const agent = new ApprovalTestAgent();
-    const service = new RunService(env.db, new EventBus(), env.config, agent);
+    const events = new EventBus();
+    const service = new RunService(env.db, events, env.config, agent);
     service.setReplySender(async () => undefined);
+    let interruptPromise: Promise<void> | null = null;
+    events.subscribe(({ event }) => {
+      if (event.type === "run.updated" && !interruptPromise) {
+        interruptPromise = service.interrupt(event.run.id);
+      }
+    });
 
     try {
       await service.admitInbound(message("prompt-3", "make a change"));
       const run = await waitFor(() => env.db.listRuns()[0] ?? null);
-      await service.interrupt(run.id);
+      await waitFor(() => interruptPromise);
+      await interruptPromise;
       const stopped = await waitFor(() => {
         const current = env.db.getRun(run.id);
         return current && current.state !== "admitted" && current.state !== "running"

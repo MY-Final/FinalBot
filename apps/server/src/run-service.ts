@@ -924,6 +924,9 @@ export class RunService {
         status: "running",
         checkpoint: { cwd: workspacePath },
       });
+      if (this.interruptRequested.has(run.id)) {
+        return this.endBeforeStart(run.id);
+      }
 
       const handle = this.agent.start(
         {
