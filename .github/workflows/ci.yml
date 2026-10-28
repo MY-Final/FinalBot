@@ -67,6 +67,32 @@ jobs:
           done
           exit 1
 
+      - name: Seed data through the API
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer ci-token" \
+            --header "Content-Type: application/json" \
+            --data '{"scope":"owner","kind":"ci","content":"ci-restart-persistence","tags":["ci"]}' \
+            http://127.0.0.1:18787/api/memory > /dev/null
+
+      - name: Restart and verify SQLite persistence
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker restart finalbot-ci
+          for attempt in {1..60}; do
+            if curl --fail --silent \
+              --header "Authorization: Bearer ci-token" \
+              "http://127.0.0.1:18787/api/memory?query=ci-restart-persistence" \
+              | grep -q "ci-restart-persistence"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
       - name: Show container logs
         if: always()
         run: docker logs finalbot-ci || true
