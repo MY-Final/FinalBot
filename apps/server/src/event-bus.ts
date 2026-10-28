@@ -1,6 +1,11 @@
 import type { ServerEvent } from "@finalbot/protocol";
 
-type Subscriber = (event: ServerEvent) => void;
+export interface EventEnvelope {
+  seq: number | null;
+  event: ServerEvent;
+}
+
+type Subscriber = (envelope: EventEnvelope) => void;
 
 export class EventBus {
   private readonly subscribers = new Set<Subscriber>();
@@ -10,14 +15,13 @@ export class EventBus {
     return () => this.subscribers.delete(subscriber);
   }
 
-  publish(event: ServerEvent): void {
+  publish(envelope: EventEnvelope): void {
     for (const subscriber of this.subscribers) {
       try {
-        subscriber(event);
+        subscriber(envelope);
       } catch {
         // A disconnected UI must not interrupt a run.
       }
     }
   }
 }
-

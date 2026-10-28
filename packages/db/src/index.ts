@@ -31,6 +31,7 @@ export interface InboxRecord {
   text: string;
   raw: unknown;
   status: "pending" | "running" | "done" | "failed";
+  error: string | null;
   receivedAt: string;
   createdAt: string;
 }
@@ -75,6 +76,14 @@ export interface ApprovalRecord {
   status: "pending" | "accepted" | "declined" | "cancelled" | "expired";
   createdAt: string;
   resolvedAt: string | null;
+}
+
+export interface RunEventRecord {
+  seq: number;
+  runId: string | null;
+  type: string;
+  payload: unknown;
+  createdAt: string;
 }
 
 interface Row {
@@ -125,6 +134,7 @@ function mapInbox(row: Row): InboxRecord {
     text: asString(row.text),
     raw: parseJson<unknown>(row.raw_json, null),
     status: asString(row.status) as InboxRecord["status"],
+    error: asNullableString(row.error),
     receivedAt: asString(row.received_at),
     createdAt: asString(row.created_at),
   };
@@ -212,6 +222,7 @@ export class FinalBotDatabase {
         text TEXT NOT NULL,
         raw_json TEXT NOT NULL DEFAULT '{}',
         status TEXT NOT NULL DEFAULT 'pending',
+        error TEXT,
         received_at TEXT NOT NULL,
         created_at TEXT NOT NULL,
         UNIQUE(conversation_id, external_message_id)
@@ -276,6 +287,14 @@ export class FinalBotDatabase {
         delivered_at TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS run_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT,
+        type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_inbox_conversation_status
         ON inbox_items(conversation_id, status, received_at);
       CREATE INDEX IF NOT EXISTS idx_runs_conversation
@@ -286,13 +305,18 @@ export class FinalBotDatabase {
         ON approval_requests(run_id, status);
       CREATE INDEX IF NOT EXISTS idx_outbox_status
         ON outbox_events(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_run_events_run
+        ON run_events(run_id, seq);
+      CREATE INDEX IF NOT EXISTS idx_run_events_created
+        ON run_events(created_at);
     `);
     this.ensureColumn("runs", "requested_by", "TEXT");
     this.ensureColumn("approval_requests", "can_accept_for_session", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("inbox_items", "error", "TEXT");
   }
 
   private ensureColumn(
-    table: "runs" | "approval_requests",
+    table: "runs" | "approval_requests" | "inbox_items",
     column: string,
     definition: string,
   ): void {
@@ -430,6 +454,7 @@ export class FinalBotDatabase {
       text: input.text,
       raw: input.raw,
       status: "pending",
+      error: null,
       receivedAt: input.receivedAt,
       createdAt: now,
     };
@@ -494,6 +519,33 @@ export class FinalBotDatabase {
     if (ids.length === 0) return;
     const statement = this.db.query("UPDATE inbox_items SET status = 'failed' WHERE id = ?");
     for (const id of ids) statement.run(id);
+  }
+
+  recoverInboxAfterRestart(): { failed: number; conversations: string[] } {
+    const failed = this.db.transaction(() => {
+      const running = this.db
+        .query("SELECT id FROM inbox_items WHERE status = 'running'")
+        .all() as Row[];
+      const update = this.db.query(
+        "UPDATE inbox_items SET status = 'failed', error = ? WHERE id = ?",
+      );
+      for (const row of running) {
+        update.run("FinalBot restarted while this message was executing.", asString(row.id));
+      }
+      return running.length;
+    })();
+    const conversations = this.db
+      .query(
+        `SELECT DISTINCT conversation_id
+         FROM inbox_items
+         WHERE status = 'pending'
+         ORDER BY created_at ASC`,
+      )
+      .all() as Row[];
+    return {
+      failed,
+      conversations: conversations.map((row) => asString(row.conversation_id)),
+    };
   }
 
   createRun(input: {
@@ -794,6 +846,49 @@ export class FinalBotDatabase {
       .run(nowIso(), runId);
   }
 
+  appendEvent(input: { runId: string | null; type: string; payload: unknown }): RunEventRecord {
+    const createdAt = nowIso();
+    const result = this.db
+      .query(
+        `INSERT INTO run_events (run_id, type, payload_json, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(input.runId, input.type, JSON.stringify(input.payload), createdAt);
+    const seq = Number(result.lastInsertRowid);
+    return {
+      seq,
+      runId: input.runId,
+      type: input.type,
+      payload: input.payload,
+      createdAt,
+    };
+  }
+
+  listEventsAfter(after: number, limit = 2000): RunEventRecord[] {
+    const rows = this.db
+      .query(
+        `SELECT * FROM run_events
+         WHERE seq > ?
+         ORDER BY seq ASC
+         LIMIT ?`,
+      )
+      .all(after, Math.max(1, Math.min(limit, 5000))) as Row[];
+    return rows.map((row) => ({
+      seq: Number(row.seq),
+      runId: asNullableString(row.run_id),
+      type: asString(row.type),
+      payload: parseJson<unknown>(row.payload_json, null),
+      createdAt: asString(row.created_at),
+    }));
+  }
+
+  latestEventSeq(): number {
+    const row = this.db
+      .query("SELECT COALESCE(MAX(seq), 0) AS seq FROM run_events")
+      .get() as Row | null;
+    return Number(row?.seq ?? 0);
+  }
+
   enqueueOutbox(type: string, payload: unknown, runId: string | null = null): string {
     const id = createId("outbox");
     this.db
@@ -805,14 +900,27 @@ export class FinalBotDatabase {
     return id;
   }
 
-  pendingOutbox(): Array<{ id: string; type: string; payload: unknown }> {
+  pendingOutbox(limit = 100): Array<{
+    id: string;
+    runId: string | null;
+    type: string;
+    payload: unknown;
+    createdAt: string;
+  }> {
     const rows = this.db
-      .query("SELECT * FROM outbox_events WHERE status = 'pending' ORDER BY created_at ASC")
-      .all() as Row[];
+      .query(
+        `SELECT * FROM outbox_events
+         WHERE status = 'pending'
+         ORDER BY created_at ASC
+         LIMIT ?`,
+      )
+      .all(Math.max(1, Math.min(limit, 1000))) as Row[];
     return rows.map((row) => ({
       id: asString(row.id),
+      runId: asNullableString(row.run_id),
       type: asString(row.type),
       payload: parseJson<unknown>(row.payload_json, null),
+      createdAt: asString(row.created_at),
     }));
   }
 

@@ -14,6 +14,7 @@ NapCat / OneBot v11 -> FinalBot -> Git worktree -> Codex app-server -> web conso
 
 - Bun + TypeScript control plane
 - SQLite WAL persistence with inbox, run, phase, approval, cursor and outbox tables
+- Durable event log with SSE replay after `Last-Event-ID`
 - OneBot v11 WebSocket adapter for private and group messages
 - Codex app-server JSON-RPC adapter with streaming, approval and interrupt
 - Isolated Git worktree per run
@@ -98,6 +99,9 @@ docker compose up --build
   native thread ID and turn ID needed to resume.
 - Recovery is at-least-once. External side effects must be made idempotent rather than
   assumed to be exactly-once.
+- On restart, queued inbox messages are rescheduled. In-flight work and pending approvals are
+  marked interrupted instead of being replayed blindly. Unsent IM replies remain in the
+  Outbox and retry when the channel reconnects.
 - The Docker image runs the control plane and agent in the same container for the first
   release. A separate execution runner is a later scaling boundary.
 

@@ -144,7 +144,11 @@ export class OneBotAdapter {
           ? await data.text()
           : data instanceof ArrayBuffer
             ? new TextDecoder().decode(data)
-            : "";
+            : ArrayBuffer.isView(data)
+              ? new TextDecoder().decode(
+                  new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+                )
+              : "";
     if (!text) return;
 
     let value: unknown;
@@ -271,10 +275,7 @@ export class OneBotAdapter {
 }
 
 export function extractText(
-  message:
-    | string
-    | Array<{ type: string; data?: Record<string, unknown> | undefined }>
-    | undefined,
+  message: string | Array<{ type: string; data?: Record<string, unknown> | undefined }> | undefined,
   rawMessage?: string,
 ): string {
   if (typeof message === "string") return message;
@@ -336,4 +337,3 @@ export function isPrivateUserAllowed(senderId: string, allowlist: string[]): boo
 export function isIgnoredUser(senderId: string, ignoredUserIds: string[]): boolean {
   return ignoredUserIds.includes(senderId);
 }
-

@@ -21,13 +21,80 @@ afterEach(async () => {
 });
 
 describe("IM approvals and interruption", () => {
+  test("requeues pending inbox work after a restart", async () => {
+    const env = await setup();
+    const conversation = env.db.upsertConversation({
+      channel: "onebot",
+      accountId: "bot",
+      externalId: "private:restart",
+      conversationKind: "private",
+      metadata: {
+        replyTarget: { kind: "onebot", messageType: "private", userId: "restart" },
+      },
+    });
+    env.db.admitInbound({
+      conversationId: conversation.id,
+      externalMessageId: "restart-message",
+      senderId: "restart",
+      text: "resume this",
+      raw: {},
+      receivedAt: new Date().toISOString(),
+    });
+    const service = new RunService(env.db, new EventBus(), env.config);
+    service.setReplySender(async () => undefined);
+
+    try {
+      await service.recover();
+      const run = await waitFor(() => {
+        const current = env.db.listRuns()[0];
+        return current?.state === "succeeded" ? current : null;
+      });
+      expect(run.prompt).toBe("resume this");
+      expect(env.db.getPendingInbox(conversation.id)).toHaveLength(0);
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
+  test("keeps a failed reply queued and flushes it after the sender recovers", async () => {
+    const env = await setup();
+    const service = new RunService(env.db, new EventBus(), env.config, new ApprovalTestAgent());
+    let connected = false;
+    const delivered: string[] = [];
+    service.setReplySender(async (_target, text) => {
+      if (!connected) throw new Error("offline");
+      delivered.push(text);
+    });
+
+    try {
+      await service.admitInbound(message("outbox-1", "make a change"));
+      const approval = await waitFor(() => pending(env.db));
+      await waitFor(() => (env.db.pendingOutbox().length > 0 ? true : null));
+      expect(env.db.pendingOutbox()[0]?.type).toBe("reply");
+
+      connected = true;
+      await service.flushOutbox();
+      service.resolveApproval(approval.requestId, { action: "accept" });
+      await waitFor(() => {
+        const run = env.db.listRuns()[0];
+        return run?.state === "succeeded" ? run : null;
+      });
+      expect(env.db.pendingOutbox()).toHaveLength(0);
+      expect(delivered.some((text) => text.includes("需要审批"))).toBe(true);
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
   test("accepts an approval response published on the approval event", async () => {
     const env = await setup();
     const agent = new ApprovalTestAgent();
     const bus = new EventBus();
     const service = new RunService(env.db, bus, env.config, agent);
     service.setReplySender(async () => undefined);
-    bus.subscribe((event) => {
+    bus.subscribe(({ event }) => {
       if (event.type === "approval.requested") {
         service.resolveApproval(event.approval.requestId, { action: "accept" });
       }

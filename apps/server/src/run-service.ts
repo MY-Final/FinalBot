@@ -18,6 +18,7 @@ import {
   type RunState,
 } from "@finalbot/core";
 import type { ApprovalRecord, FinalBotDatabase, RunRecord } from "@finalbot/db";
+import type { ServerEvent } from "@finalbot/protocol";
 import { GitWorkspaceManager } from "@finalbot/workspace-git";
 import { ApprovalBroker } from "./approval-broker";
 import type { AppConfig } from "./config";
@@ -40,6 +41,9 @@ export class RunService {
   private readonly interruptRequested = new Set<string>();
   private readonly workspace: GitWorkspaceManager | null;
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly outboxInFlight = new Set<string>();
+  private readonly outboxTimer: ReturnType<typeof setInterval>;
+  private closed = false;
   private replySender: ReplySender | null = null;
 
   constructor(
@@ -59,6 +63,8 @@ export class RunService {
     this.workspace = config.repositoryPath
       ? new GitWorkspaceManager(config.repositoryPath, config.worktreesDir)
       : null;
+    this.outboxTimer = setInterval(() => void this.flushOutbox(), 5_000);
+    this.outboxTimer.unref?.();
   }
 
   setReplySender(sender: ReplySender): void {
@@ -92,6 +98,7 @@ export class RunService {
       receivedAt: message.receivedAt,
     });
     if (admitted.duplicate) return;
+    if (this.closed) return;
     this.scheduleConversation(conversation.id);
   }
 
@@ -270,17 +277,38 @@ export class RunService {
   private async reply(target: ReplyTarget | null, text: string): Promise<void> {
     if (!target) return;
     if (!this.replySender) return;
+    const outboxId = this.db.enqueueOutbox("reply", { target, text });
+    await this.deliverOutbox(outboxId, target, text);
+  }
+
+  async flushOutbox(): Promise<void> {
+    if (!this.replySender) return;
+    const pending = this.db.pendingOutbox();
+    for (const item of pending) {
+      if (item.type !== "reply" || this.outboxInFlight.has(item.id)) continue;
+      const payload = parseReplyPayload(item.payload);
+      if (!payload) {
+        console.error(`[finalbot] invalid outbox payload: ${item.id}`);
+        continue;
+      }
+      const delivered = await this.deliverOutbox(item.id, payload.target, payload.text);
+      if (!delivered) break;
+    }
+  }
+
+  private async deliverOutbox(id: string, target: ReplyTarget, text: string): Promise<boolean> {
+    if (!this.replySender || this.outboxInFlight.has(id)) return false;
+    this.outboxInFlight.add(id);
     try {
       await this.replySender(target, text);
+      this.db.markOutboxDelivered(id);
+      return true;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      this.bus.publish({
-        type: "system",
-        level: "error",
-        message: `Failed to send reply: ${detail}`,
-        at: nowIso(),
-      });
-      console.error(`[finalbot] failed to send reply: ${detail}`);
+      console.error(`[finalbot] failed to send reply, will retry: ${detail}`);
+      return false;
+    } finally {
+      this.outboxInFlight.delete(id);
     }
   }
 
@@ -296,6 +324,7 @@ export class RunService {
   }
 
   private async drainConversation(conversationId: string): Promise<void> {
+    if (this.closed) return;
     if (this.activeConversations.has(conversationId)) return;
     if (this.db.countActiveRuns() >= this.config.maxConcurrentRuns) {
       this.scheduleConversation(conversationId);
@@ -344,7 +373,7 @@ export class RunService {
       }
     } finally {
       this.activeConversations.delete(conversationId);
-      if (this.db.getPendingInbox(conversationId).length > 0) {
+      if (!this.closed && this.db.getPendingInbox(conversationId).length > 0) {
         this.scheduleConversation(conversationId);
       }
     }
@@ -524,18 +553,17 @@ export class RunService {
       return;
     }
     if (event.type === "delta") {
-      const updated = this.db.updateRun(runId, { outputAppend: event.text });
-      this.bus.publish({
+      this.db.updateRun(runId, { outputAppend: event.text });
+      this.emitEvent(runId, {
         type: "run.delta",
         runId,
         text: event.text,
         at: nowIso(),
       });
-      void updated;
       return;
     }
     if (event.type === "warning") {
-      this.bus.publish({
+      this.emitEvent(runId, {
         type: "system",
         level: "warning",
         message: event.message,
@@ -644,7 +672,7 @@ export class RunService {
   }
 
   private publishRun(run: RunRecord): void {
-    this.bus.publish({
+    this.emitEvent(run.id, {
       type: "run.updated",
       run: {
         id: run.id,
@@ -671,7 +699,7 @@ export class RunService {
     approval: ApprovalRecord,
     type: "approval.requested" | "approval.resolved",
   ): void {
-    this.bus.publish({
+    this.emitEvent(approval.runId, {
       type,
       approval: {
         requestId: approval.requestId,
@@ -689,15 +717,39 @@ export class RunService {
   }
 
   async recover(): Promise<void> {
-    const runs = this.db.recoverActiveRuns();
-    for (const run of runs) this.publishRun(run);
+    const recoveredRuns = this.db.recoverActiveRuns();
+    const inbox = this.db.recoverInboxAfterRestart();
+    for (const run of recoveredRuns) this.publishRun(run);
+    if (recoveredRuns.length > 0 || inbox.failed > 0) {
+      this.emitEvent(null, {
+        type: "system",
+        level: "warning",
+        message: `Recovered after restart: ${recoveredRuns.length} run(s) interrupted, ${inbox.failed} message(s) marked failed, ${inbox.conversations.length} conversation(s) requeued.`,
+        at: nowIso(),
+      });
+    }
+    for (const conversationId of inbox.conversations) {
+      this.scheduleConversation(conversationId);
+    }
+    await this.flushOutbox();
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    clearInterval(this.outboxTimer);
     for (const timer of this.debounceTimers.values()) clearTimeout(timer);
     this.debounceTimers.clear();
     this.approvals.cancelAll();
     await this.agent.close?.();
+  }
+
+  private emitEvent(runId: string | null, event: ServerEvent): void {
+    const record = this.db.appendEvent({
+      runId,
+      type: event.type,
+      payload: event,
+    });
+    this.bus.publish({ seq: record.seq, event });
   }
 }
 
@@ -725,6 +777,29 @@ function formatApprovalNotice(approval: ApprovalRecord): string {
 function truncate(value: string, max: number): string {
   const compact = value.trim();
   return compact.length > max ? `${compact.slice(0, max)}...` : compact;
+}
+
+function parseReplyPayload(payload: unknown): { target: ReplyTarget; text: string } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const candidate = payload as { target?: unknown; text?: unknown };
+  if (
+    !candidate.target ||
+    typeof candidate.target !== "object" ||
+    typeof candidate.text !== "string"
+  ) {
+    return null;
+  }
+  const target = candidate.target as Partial<ReplyTarget>;
+  if (target.kind === "web") {
+    return { target: { kind: "web" }, text: candidate.text };
+  }
+  if (
+    target.kind === "onebot" &&
+    (target.messageType === "group" || target.messageType === "private")
+  ) {
+    return { target: target as ReplyTarget, text: candidate.text };
+  }
+  return null;
 }
 
 class DemoAgentAdapter implements AgentAdapter {
