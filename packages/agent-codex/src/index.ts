@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type AgentAdapter,
   type AgentEvent,
@@ -43,10 +44,35 @@ interface ActiveRun {
   nativeTurnId: string | null;
   output: string;
   sink: AgentSink;
+  dynamicToolRoutes: CodexDynamicToolRoutes | null;
   resolve: (result: AgentRunResult) => void;
   reject: (error: Error) => void;
   finished: boolean;
   structuredOutput?: unknown;
+}
+
+export interface CodexDynamicToolNamespace {
+  type: "namespace";
+  name: string;
+  description: string;
+  tools: DynamicToolSpec[];
+}
+
+export type CodexDynamicTool = DynamicToolSpec | CodexDynamicToolNamespace;
+
+export interface CodexDynamicToolNamespaceRoute {
+  namespace: string;
+  tools: Map<string, string>;
+}
+
+export interface CodexDynamicToolRoutes {
+  flatTools: Map<string, string>;
+  namespaces: Map<string, CodexDynamicToolNamespaceRoute>;
+}
+
+export interface CompiledCodexDynamicTools {
+  tools: CodexDynamicTool[];
+  routes: CodexDynamicToolRoutes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -332,13 +358,15 @@ export class CodexAppServerClient {
     if (!threadId || !turnId || !callId || !tool) {
       return dynamicFailure("Invalid dynamic tool call payload");
     }
+    const route = resolveCodexDynamicToolCall(run.dynamicToolRoutes, namespace, tool);
+    if (!route) return dynamicFailure(`Unknown dynamic tool: ${namespace ?? tool}`);
     try {
       return await run.sink.callTool({
         threadId,
         turnId,
         callId,
-        namespace,
-        tool,
+        namespace: route.namespace,
+        tool: route.tool,
         arguments: params.arguments,
       });
     } catch (error) {
@@ -424,6 +452,7 @@ export class CodexAppServerClient {
 
   async startRun(input: AgentRunInput, sink: AgentSink): Promise<AgentRunHandle> {
     await this.ensureStarted();
+    const dynamicTools = input.dynamicTools ? compileCodexDynamicTools(input.dynamicTools) : null;
 
     let resultResolve!: (value: AgentRunResult) => void;
     let resultReject!: (error: Error) => void;
@@ -436,6 +465,7 @@ export class CodexAppServerClient {
       nativeTurnId: null,
       output: "",
       sink,
+      dynamicToolRoutes: dynamicTools?.routes ?? null,
       resolve: resultResolve,
       reject: resultReject,
       finished: false,
@@ -457,7 +487,7 @@ export class CodexAppServerClient {
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           excludeTurns: true,
-          ...(input.dynamicTools ? { dynamicTools: toCodexDynamicTools(input.dynamicTools) } : {}),
+          ...(dynamicTools ? { dynamicTools: dynamicTools.tools } : {}),
         })) as CodexThreadResumeResult;
         threadId = resumed.thread.id;
       } else {
@@ -470,7 +500,7 @@ export class CodexAppServerClient {
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           serviceName: "finalbot",
-          ...(input.dynamicTools ? { dynamicTools: toCodexDynamicTools(input.dynamicTools) } : {}),
+          ...(dynamicTools ? { dynamicTools: dynamicTools.tools } : {}),
         })) as CodexThreadStartResult;
         threadId = started.thread.id;
       }
@@ -606,15 +636,7 @@ function toFileDecision(decision: ApprovalDecision): CodexFileChangeApprovalDeci
   return toCommandDecision(decision);
 }
 
-function toCodexDynamicTools(tools: DynamicToolSpec[]): Array<
-  | DynamicToolSpec
-  | {
-      type: "namespace";
-      name: string;
-      description: string;
-      tools: DynamicToolSpec[];
-    }
-> {
+export function compileCodexDynamicTools(tools: DynamicToolSpec[]): CompiledCodexDynamicTools {
   const flat: DynamicToolSpec[] = [];
   const namespaces = new Map<string, DynamicToolSpec[]>();
   for (const tool of tools) {
@@ -629,15 +651,70 @@ function toCodexDynamicTools(tools: DynamicToolSpec[]): Array<
     group.push({ ...tool, name });
     namespaces.set(namespace, group);
   }
-  return [
-    ...flat,
-    ...[...namespaces.entries()].map(([name, namespaceTools]) => ({
+  const usedTopLevelNames = new Set<string>();
+  const flatRoutes = new Map<string, string>();
+  const compiledFlat = flat.map((tool) => {
+    const codexName = uniqueCodexName(tool.name, usedTopLevelNames);
+    flatRoutes.set(codexName, tool.name);
+    return { ...tool, name: codexName };
+  });
+  const namespaceRoutes = new Map<string, CodexDynamicToolNamespaceRoute>();
+  const compiledNamespaces = [...namespaces.entries()].map(([namespace, namespaceTools]) => {
+    const codexNamespace = uniqueCodexName(namespace, usedTopLevelNames);
+    const usedToolNames = new Set<string>();
+    const route = new Map<string, string>();
+    const compiledTools = namespaceTools.map((tool) => {
+      const codexName = uniqueCodexName(tool.name, usedToolNames);
+      route.set(codexName, tool.name);
+      return { ...tool, name: codexName };
+    });
+    namespaceRoutes.set(codexNamespace, { namespace, tools: route });
+    return {
       type: "namespace" as const,
-      name,
-      description: `${name} tools`,
-      tools: namespaceTools,
-    })),
-  ];
+      name: codexNamespace,
+      description: `${namespace} tools`,
+      tools: compiledTools,
+    };
+  });
+  return {
+    tools: [...compiledFlat, ...compiledNamespaces],
+    routes: {
+      flatTools: flatRoutes,
+      namespaces: namespaceRoutes,
+    },
+  };
+}
+
+export function resolveCodexDynamicToolCall(
+  routes: CodexDynamicToolRoutes | null,
+  namespace: string | null,
+  tool: string,
+): { namespace: string | null; tool: string } | null {
+  if (!routes) return null;
+  if (namespace) {
+    const route = routes.namespaces.get(namespace);
+    const routedTool = route?.tools.get(tool);
+    return route && routedTool ? { namespace: route.namespace, tool: routedTool } : null;
+  }
+  const routedTool = routes.flatTools.get(tool);
+  return routedTool ? { namespace: null, tool: routedTool } : null;
+}
+
+function uniqueCodexName(value: string, used: Set<string>): string {
+  const base = value.replaceAll(/[^a-zA-Z0-9_-]/g, "_") || "tool";
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  const suffix = createHash("sha256").update(value).digest("hex").slice(0, 8);
+  let candidate = `${base}_${suffix}`;
+  let counter = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}_${suffix}_${counter}`;
+    counter += 1;
+  }
+  used.add(candidate);
+  return candidate;
 }
 
 function dynamicFailure(message: string): DynamicToolResult {
