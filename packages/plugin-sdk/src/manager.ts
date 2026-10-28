@@ -142,14 +142,16 @@ export class PluginManager {
     const descriptor = this.discovered.get(pluginId);
     if (!descriptor) throw new Error(`Plugin not found: ${pluginId}`);
     this.options.db.setPluginEnabled(pluginId, true);
-    if (!this.loaded.has(pluginId)) {
-      try {
-        await this.activate(descriptor);
-      } catch (error) {
-        this.markPluginError(pluginId, error);
-        this.notifyToolsChanged();
-        throw error;
-      }
+    if (this.loaded.has(pluginId)) {
+      this.options.db.updatePluginStatus(pluginId, "active", null);
+      return this.list();
+    }
+    try {
+      await this.activate(descriptor);
+    } catch (error) {
+      this.markPluginError(pluginId, error);
+      this.notifyToolsChanged();
+      throw error;
     }
     this.notifyToolsChanged();
     return this.list();

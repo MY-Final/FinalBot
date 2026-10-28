@@ -64,6 +64,12 @@ export default {
       }),
     ]);
 
+    await env.manager.enable("echo");
+    expect(env.manager.list()[0]).toMatchObject({
+      enabled: true,
+      status: "active",
+    });
+
     const tool = env.manager.listTools()[0];
     expect(tool).toBeDefined();
     const firstResult = await tool?.execute({ value: "hello" }, invocationContext());
