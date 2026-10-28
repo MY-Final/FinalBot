@@ -206,6 +206,170 @@ describe("IM approvals and interruption", () => {
   });
 });
 
+describe("bot dispatch", () => {
+  test("lists bots and switches the active bot without creating a run", async () => {
+    const env = await setup();
+    env.db.upsertBotProfile({
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Reviews changes",
+      instructions: "Review code carefully.",
+      agent: "codex",
+      model: "review-model",
+    });
+    const service = new RunService(env.db, new EventBus(), env.config);
+    const replies: string[] = [];
+    service.setReplySender(async (_target, text) => {
+      replies.push(text);
+    });
+
+    try {
+      await service.admitInbound(message("bots-1", "/bots"));
+      expect(replies.at(-1)).toContain("coder / Coder / codex");
+      expect(replies.at(-1)).toContain("reviewer / Reviewer / codex");
+      expect(replies.at(-1)).toContain("当前：coder");
+      expect(env.db.listRuns()).toHaveLength(0);
+
+      await service.admitInbound(message("use-1", "/use reviewer"));
+      const conversation = env.db.getConversationByExternal("onebot", "bot", "private:10001");
+      expect(conversation?.activeBotId).toBe("reviewer");
+      expect(replies.at(-1)).toContain("Reviewer");
+      expect(env.db.listRuns()).toHaveLength(0);
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
+  test("dispatches a one-shot bot without changing the active bot", async () => {
+    const env = await setup();
+    env.db.upsertBotProfile({
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Reviews changes",
+      instructions: "Review code carefully.",
+      agent: "codex",
+      model: "review-model",
+    });
+    const service = new RunService(env.db, new EventBus(), env.config, new InspectingAgent());
+    service.setReplySender(async () => undefined);
+
+    try {
+      await service.admitInbound(message("bot-1", "/bot reviewer inspect the auth flow"));
+      const run = await waitFor(() => {
+        const current = env.db.listRuns()[0];
+        return current?.state === "succeeded" ? current : null;
+      });
+      expect(run).toMatchObject({
+        botId: "reviewer",
+        botName: "Reviewer",
+        botInstructions: "Review code carefully.",
+        model: "review-model",
+        prompt: "inspect the auth flow",
+      });
+      const conversation = env.db.getConversationByExternal("onebot", "bot", "private:10001");
+      expect(conversation?.activeBotId).toBe("coder");
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
+  test("freezes bot ownership for queued messages before a later /use", async () => {
+    const env = await setup();
+    env.db.upsertBotProfile({
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Reviews changes",
+      instructions: "Review code carefully.",
+      agent: "codex",
+    });
+    const service = new RunService(env.db, new EventBus(), env.config, new InspectingAgent());
+    service.setReplySender(async () => undefined);
+
+    try {
+      await service.admitInbound(message("queued-1", "coder task"));
+      await service.admitInbound(message("use-2", "/use reviewer"));
+      const run = await waitFor(() => {
+        const current = env.db.listRuns()[0];
+        return current?.state === "succeeded" ? current : null;
+      });
+      expect(run.botId).toBe("coder");
+      const conversation = env.db.getConversationByExternal("onebot", "bot", "private:10001");
+      expect(conversation?.activeBotId).toBe("reviewer");
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
+  test("uses the active bot profile for later normal messages", async () => {
+    const env = await setup();
+    env.db.upsertBotProfile({
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Reviews changes",
+      instructions: "Review code carefully.",
+      agent: "codex",
+    });
+    const agent = new InspectingAgent();
+    const service = new RunService(env.db, new EventBus(), env.config, agent);
+    service.setReplySender(async () => undefined);
+
+    try {
+      await service.admitInbound(message("use-3", "/use reviewer"));
+      await service.admitInbound(message("queued-2", "review this change"));
+      const run = await waitFor(() => {
+        const current = env.db.listRuns()[0];
+        return current?.state === "succeeded" ? current : null;
+      });
+      expect(run).toMatchObject({
+        botId: "reviewer",
+        botName: "Reviewer",
+        botInstructions: "Review code carefully.",
+        prompt: "review this change",
+      });
+      expect(agent.inputs[0]).toMatchObject({
+        developerInstructions: "Review code carefully.",
+        prompt: "review this change",
+      });
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+
+  test("does not merge pending messages from different bots into one run", async () => {
+    const env = await setup();
+    env.db.upsertBotProfile({
+      id: "reviewer",
+      name: "Reviewer",
+      description: "Reviews changes",
+      instructions: "Review code carefully.",
+      agent: "codex",
+    });
+    const agent = new InspectingAgent({ pauseMs: 150 });
+    const service = new RunService(env.db, new EventBus(), env.config, agent);
+    service.setReplySender(async () => undefined);
+
+    try {
+      await service.admitInbound(message("mixed-1", "coder task"));
+      await service.admitInbound(message("mixed-2", "/bot reviewer review task"));
+      await waitFor(() => (env.db.listRuns().length === 2 ? true : null));
+      await waitFor(() =>
+        env.db.listRuns().every((run) => run.state === "succeeded") ? true : null,
+      );
+
+      const runs = env.db.listRuns().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      expect(runs.map((run) => run.botId)).toEqual(["coder", "reviewer"]);
+      expect(runs.map((run) => run.prompt)).toEqual(["coder task", "review task"]);
+    } finally {
+      await service.close();
+      env.db.close();
+    }
+  });
+});
+
 class ApprovalTestAgent implements AgentAdapter {
   readonly decisions: ApprovalDecision[] = [];
   interrupted = false;
@@ -241,6 +405,31 @@ class ApprovalTestAgent implements AgentAdapter {
       interrupt: async () => {
         this.interrupted = true;
       },
+    };
+  }
+}
+
+class InspectingAgent implements AgentAdapter {
+  readonly inputs: Parameters<AgentAdapter["start"]>[0][] = [];
+
+  constructor(private readonly options: { pauseMs?: number } = {}) {}
+
+  start(input: Parameters<AgentAdapter["start"]>[0], sink: AgentSink): AgentRunHandle {
+    this.inputs.push(input);
+    const result = (async () => {
+      await sink.event({ type: "thread", nativeThreadId: `thread_${input.runId}` });
+      await sink.event({ type: "turn", nativeTurnId: `turn_${input.runId}` });
+      if (this.options.pauseMs) await Bun.sleep(this.options.pauseMs);
+      return {
+        status: "succeeded" as const,
+        nativeThreadId: `thread_${input.runId}`,
+        nativeTurnId: `turn_${input.runId}`,
+        output: "done",
+      };
+    })();
+    return {
+      result,
+      interrupt: async () => undefined,
     };
   }
 }

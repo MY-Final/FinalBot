@@ -31,9 +31,31 @@ describe("IM command parsing", () => {
   test("supports status/help aliases and rejects malformed arguments", () => {
     expect(parseImCommand("/status")).toEqual({ kind: "status", raw: "/status" });
     expect(parseImCommand("/帮助")).toEqual({ kind: "help", raw: "/帮助" });
+    expect(parseImCommand("/status extra")).toEqual({ kind: "unknown", raw: "/status extra" });
+    expect(parseImCommand("/help extra")).toEqual({ kind: "unknown", raw: "/help extra" });
+    expect(parseImCommand("/stop now")).toEqual({ kind: "unknown", raw: "/stop now" });
     expect(parseImCommand("/approve two ids")).toEqual({
       kind: "unknown",
       raw: "/approve two ids",
+    });
+  });
+
+  test("parses bot listing, selection and one-shot dispatch", () => {
+    expect(parseImCommand("/bots")).toEqual({ kind: "bots", raw: "/bots" });
+    expect(parseImCommand("/use reviewer")).toEqual({
+      kind: "use",
+      bot: "reviewer",
+      raw: "/use reviewer",
+    });
+    expect(parseImCommand("/bot reviewer inspect the auth flow")).toEqual({
+      kind: "bot",
+      bot: "reviewer",
+      prompt: "inspect the auth flow",
+      raw: "/bot reviewer inspect the auth flow",
+    });
+    expect(parseImCommand("/bot reviewer")).toEqual({
+      kind: "unknown",
+      raw: "/bot reviewer",
     });
   });
 });

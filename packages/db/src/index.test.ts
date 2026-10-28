@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,6 +31,8 @@ describe("approval persistence", () => {
         conversationId: conversation.id,
         prompt: "test",
         requestedBy: "10001",
+        botId: "coder",
+        botName: "Coder",
         agent: "codex",
       });
       const approval = db.createApproval({
@@ -66,6 +69,8 @@ describe("approval persistence", () => {
         conversationId: conversation.id,
         prompt: "test",
         requestedBy: "10001",
+        botId: "coder",
+        botName: "Coder",
         agent: "codex",
       });
       db.updateRun(run.id, { state: "running" });
@@ -182,6 +187,240 @@ describe("durable events and recovery", () => {
 
       db.markOutboxDelivered(id);
       expect(db.pendingOutbox()).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("bot profiles and routing state", () => {
+  test("migrates databases created before bot profiles existed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "finalbot-db-migration-"));
+    tempDirs.push(dir);
+    const path = join(dir, "old.sqlite");
+    const legacy = new Database(path, { create: true, readwrite: true });
+    legacy.exec(`
+      CREATE TABLE conversations (
+        id TEXT PRIMARY KEY,
+        channel TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        conversation_kind TEXT NOT NULL,
+        title TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(channel, account_id, external_id)
+      );
+      CREATE TABLE inbox_items (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        external_message_id TEXT NOT NULL,
+        sender_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        raw_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        received_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(conversation_id, external_message_id)
+      );
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        prompt TEXT NOT NULL,
+        state TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        native_thread_id TEXT,
+        native_turn_id TEXT,
+        workspace_path TEXT,
+        output TEXT NOT NULL DEFAULT '',
+        error TEXT,
+        reply_target_json TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      );
+      INSERT INTO conversations
+        (id, channel, account_id, external_id, conversation_kind, metadata_json, created_at, updated_at)
+      VALUES
+        ('conv_old', 'onebot', 'bot', 'private:1', 'private', '{}', '2026-01-01', '2026-01-01');
+      INSERT INTO inbox_items
+        (id, conversation_id, external_message_id, sender_id, text, raw_json, status, received_at, created_at)
+      VALUES
+        ('inbox_old', 'conv_old', 'msg_old', '1', 'hello', '{}', 'pending', '2026-01-01', '2026-01-01');
+      INSERT INTO runs
+        (id, conversation_id, prompt, state, agent, output, error, created_at, updated_at)
+      VALUES
+        ('run_old', 'conv_old', 'task', 'failed', 'codex', '', 'err', '2026-01-01', '2026-01-01');
+    `);
+    legacy.close();
+
+    const db = new FinalBotDatabase(path);
+    try {
+      expect(db.getConversation("conv_old")?.activeBotId).toBe("coder");
+      expect(db.getPendingInbox("conv_old")[0]?.botId).toBe("coder");
+      expect(db.getRun("run_old")).toMatchObject({
+        botId: "coder",
+        botName: "Coder",
+        model: null,
+      });
+      expect(db.getBotProfile("coder")?.enabled).toBe(true);
+      expect(
+        db.db
+          .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
+          .get("idx_inbox_conversation_bot"),
+      ).not.toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("seeds the default coder bot and persists profile updates", async () => {
+    const db = await createDatabase();
+    try {
+      expect(db.getBotProfile("coder")).toMatchObject({
+        id: "coder",
+        name: "Coder",
+        agent: "codex",
+        enabled: true,
+      });
+
+      const reviewer = db.upsertBotProfile({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Reviews changes",
+        instructions: "Review code carefully.",
+        agent: "codex",
+        model: "review-model",
+      });
+      expect(reviewer).toMatchObject({
+        id: "reviewer",
+        name: "Reviewer",
+        model: "review-model",
+      });
+      expect(db.listBotProfiles().map((bot) => bot.id)).toEqual(["coder", "reviewer"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("switches the active bot without changing queued inbox ownership", async () => {
+    const db = await createDatabase();
+    try {
+      db.upsertBotProfile({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Reviews changes",
+        instructions: "Review code carefully.",
+        agent: "codex",
+      });
+      const conversation = db.upsertConversation({
+        channel: "onebot",
+        accountId: "bot",
+        externalId: "private:routing",
+        conversationKind: "private",
+      });
+      expect(conversation.activeBotId).toBe("coder");
+
+      db.admitInbound({
+        conversationId: conversation.id,
+        externalMessageId: "queued-coder",
+        botId: "coder",
+        senderId: "10001",
+        text: "first",
+        raw: {},
+        receivedAt: new Date().toISOString(),
+      });
+      const switched = db.setConversationActiveBot(conversation.id, "reviewer");
+      expect(switched.activeBotId).toBe("reviewer");
+
+      expect(db.getPendingInbox(conversation.id).map((item) => item.botId)).toEqual(["coder"]);
+      expect(db.getPendingInbox(conversation.id, "reviewer")).toHaveLength(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("keeps agent sessions isolated by bot within one conversation", async () => {
+    const db = await createDatabase();
+    try {
+      db.upsertBotProfile({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Reviews changes",
+        instructions: "Review code carefully.",
+        agent: "codex",
+      });
+      const conversation = db.upsertConversation({
+        channel: "onebot",
+        accountId: "bot",
+        externalId: "private:sessions",
+        conversationKind: "private",
+      });
+      const coderRun = db.createRun({
+        conversationId: conversation.id,
+        prompt: "implementation",
+        botId: "coder",
+        botName: "Coder",
+        agent: "codex",
+      });
+      db.updateRun(coderRun.id, { nativeThreadId: "thread_coder" });
+      const reviewerRun = db.createRun({
+        conversationId: conversation.id,
+        prompt: "review",
+        botId: "reviewer",
+        botName: "Reviewer",
+        agent: "codex",
+      });
+      db.updateRun(reviewerRun.id, { nativeThreadId: "thread_reviewer" });
+
+      expect(db.getLatestConversationSession(conversation.id, "coder")).toEqual({
+        nativeThreadId: "thread_coder",
+      });
+      expect(db.getLatestConversationSession(conversation.id, "reviewer")).toEqual({
+        nativeThreadId: "thread_reviewer",
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("recovers inbox queues grouped by conversation and bot", async () => {
+    const db = await createDatabase();
+    try {
+      db.upsertBotProfile({
+        id: "reviewer",
+        name: "Reviewer",
+        description: "Reviews changes",
+        instructions: "Review code carefully.",
+        agent: "codex",
+      });
+      const conversation = db.upsertConversation({
+        channel: "onebot",
+        accountId: "bot",
+        externalId: "private:recover-bots",
+        conversationKind: "private",
+      });
+      for (const [id, botId] of [
+        ["message-1", "coder"],
+        ["message-2", "reviewer"],
+      ] as const) {
+        db.admitInbound({
+          conversationId: conversation.id,
+          externalMessageId: id,
+          botId,
+          senderId: "10001",
+          text: id,
+          raw: {},
+          receivedAt: new Date().toISOString(),
+        });
+      }
+
+      expect(db.recoverQueueAfterRestart().queues).toEqual([
+        { conversationId: conversation.id, botId: "coder" },
+        { conversationId: conversation.id, botId: "reviewer" },
+      ]);
     } finally {
       db.close();
     }

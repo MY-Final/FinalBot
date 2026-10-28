@@ -1,5 +1,4 @@
 import {
-  createId,
   type AgentAdapter,
   type AgentEvent,
   type AgentRunHandle,
@@ -7,6 +6,7 @@ import {
   type AgentRunResult,
   type AgentSink,
   type ApprovalDecision,
+  createId,
 } from "@finalbot/core";
 import type {
   CodexCommandApprovalDecision,
@@ -175,7 +175,9 @@ export class CodexAppServerClient {
         this.pending.delete(incoming.id);
         clearTimeout(pending.timer);
         const error = incoming.error;
-        pending.reject(new Error(isRecord(error) ? String(error.message ?? "RPC failed") : "RPC failed"));
+        pending.reject(
+          new Error(isRecord(error) ? String(error.message ?? "RPC failed") : "RPC failed"),
+        );
       }
       return;
     }
@@ -216,9 +218,10 @@ export class CodexAppServerClient {
     if (method === "turn/completed") {
       const turn = isRecord(params.turn) ? params.turn : null;
       const status = turn && typeof turn.status === "string" ? turn.status : "failed";
-      const error = turn && isRecord(turn.error) && typeof turn.error.message === "string"
-        ? turn.error.message
-        : undefined;
+      const error =
+        turn && isRecord(turn.error) && typeof turn.error.message === "string"
+          ? turn.error.message
+          : undefined;
       this.settleRun(run, status, error);
     }
   }
@@ -377,10 +380,7 @@ export class CodexAppServerClient {
     void stdin.flush();
   }
 
-  async startRun(
-    input: AgentRunInput,
-    sink: AgentSink,
-  ): Promise<AgentRunHandle> {
+  async startRun(input: AgentRunInput, sink: AgentSink): Promise<AgentRunHandle> {
     await this.ensureStarted();
 
     let resultResolve!: (value: AgentRunResult) => void;
@@ -403,11 +403,15 @@ export class CodexAppServerClient {
 
     try {
       let threadId = input.nativeThreadId;
+      const model = input.model ?? this.config.model;
       if (threadId) {
         const resumed = (await this.request("thread/resume", {
           threadId,
           cwd: input.cwd,
-          ...(this.config.model ? { model: this.config.model } : {}),
+          ...(model ? { model } : {}),
+          ...(input.developerInstructions
+            ? { developerInstructions: input.developerInstructions }
+            : {}),
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           excludeTurns: true,
@@ -416,7 +420,10 @@ export class CodexAppServerClient {
       } else {
         const started = (await this.request("thread/start", {
           cwd: input.cwd,
-          ...(this.config.model ? { model: this.config.model } : {}),
+          ...(model ? { model } : {}),
+          ...(input.developerInstructions
+            ? { developerInstructions: input.developerInstructions }
+            : {}),
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           serviceName: "finalbot",
@@ -441,7 +448,7 @@ export class CodexAppServerClient {
             : input.sandbox === "danger-full-access"
               ? { type: "dangerFullAccess" }
               : { type: "workspaceWrite", writableRoots: [input.cwd], networkAccess: false },
-        ...(this.config.model ? { model: this.config.model } : {}),
+        ...(model ? { model } : {}),
       })) as CodexTurnStartResult;
       active.nativeTurnId = started.turn.id;
       await sink.event({ type: "turn", nativeTurnId: started.turn.id });
@@ -576,4 +583,3 @@ export function agentEventsToText(events: AgentEvent[]): string {
     .map((event) => event.text)
     .join("");
 }
-

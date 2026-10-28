@@ -38,9 +38,12 @@ body {
   background:
     linear-gradient(rgb(255 255 255 / 46%) 1px, transparent 1px),
     linear-gradient(90deg, rgb(255 255 255 / 46%) 1px, transparent 1px),
-    radial-gradient(circle at 78% 8%, rgb(29 102 101 / 10%), transparent 28%),
-    var(--paper-deep);
-  background-size: 30px 30px, 30px 30px, auto, auto;
+    radial-gradient(circle at 78% 8%, rgb(29 102 101 / 10%), transparent 28%), var(--paper-deep);
+  background-size:
+    30px 30px,
+    30px 30px,
+    auto,
+    auto;
 }
 
 button,
@@ -247,6 +250,33 @@ button:disabled {
   text-transform: uppercase;
 }
 
+.bot-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: -2px 0 10px;
+  padding: 0;
+  border: 0;
+}
+
+.bot-picker button {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  background: transparent;
+  font-family: var(--mono);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.bot-picker button:hover,
+.bot-picker button.is-active {
+  border-color: var(--sea);
+  color: var(--sea);
+  background: var(--sea-pale);
+}
+
 .composer textarea {
   display: block;
   width: 100%;
@@ -304,7 +334,9 @@ kbd + b {
   font-size: 11px;
   font-weight: 650;
   cursor: pointer;
-  transition: background 160ms ease, transform 160ms ease;
+  transition:
+    background 160ms ease,
+    transform 160ms ease;
 }
 
 .dispatch-button:hover {
@@ -336,7 +368,10 @@ kbd + b {
   background: transparent;
   cursor: pointer;
   animation: reveal 340ms ease both;
-  transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    transform 150ms ease;
 }
 
 .run-card:hover {
@@ -1093,4 +1128,3 @@ kbd + b {
     transition-duration: 0.01ms !important;
   }
 }
-

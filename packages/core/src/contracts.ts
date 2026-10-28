@@ -70,6 +70,7 @@ export interface AgentRunInput {
   cwd: string;
   nativeThreadId?: string;
   model?: string;
+  developerInstructions?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
 }
 

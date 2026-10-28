@@ -18,6 +18,7 @@ export interface ConversationRecord {
   externalId: string;
   conversationKind: ConversationKind;
   title: string | null;
+  activeBotId: string;
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -27,6 +28,7 @@ export interface InboxRecord {
   id: string;
   conversationId: string;
   externalMessageId: string;
+  botId: string;
   senderId: string;
   text: string;
   raw: unknown;
@@ -41,8 +43,12 @@ export interface RunRecord {
   conversationId: string;
   prompt: string;
   requestedBy: string | null;
+  botId: string;
+  botName: string;
+  botInstructions: string | null;
   state: RunState;
   agent: string;
+  model: string | null;
   nativeThreadId: string | null;
   nativeTurnId: string | null;
   workspacePath: string | null;
@@ -86,6 +92,19 @@ export interface RunEventRecord {
   createdAt: string;
 }
 
+export interface BotProfileRecord {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  agent: string;
+  model: string | null;
+  workspacePath: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface Row {
   [key: string]: unknown;
 }
@@ -119,6 +138,7 @@ function mapConversation(row: Row): ConversationRecord {
     externalId: asString(row.external_id),
     conversationKind: asString(row.conversation_kind) as ConversationKind,
     title: asNullableString(row.title),
+    activeBotId: asString(row.active_bot_id, "coder"),
     metadata: parseJson<Record<string, unknown>>(row.metadata_json, {}),
     createdAt: asString(row.created_at),
     updatedAt: asString(row.updated_at),
@@ -130,6 +150,7 @@ function mapInbox(row: Row): InboxRecord {
     id: asString(row.id),
     conversationId: asString(row.conversation_id),
     externalMessageId: asString(row.external_message_id),
+    botId: asString(row.bot_id, "coder"),
     senderId: asString(row.sender_id),
     text: asString(row.text),
     raw: parseJson<unknown>(row.raw_json, null),
@@ -146,8 +167,12 @@ function mapRun(row: Row): RunRecord {
     conversationId: asString(row.conversation_id),
     prompt: asString(row.prompt),
     requestedBy: asNullableString(row.requested_by),
+    botId: asString(row.bot_id, "coder"),
+    botName: asString(row.bot_name, "Coder"),
+    botInstructions: asNullableString(row.bot_instructions),
     state: asString(row.state) as RunState,
     agent: asString(row.agent),
+    model: asNullableString(row.model),
     nativeThreadId: asNullableString(row.native_thread_id),
     nativeTurnId: asNullableString(row.native_turn_id),
     workspacePath: asNullableString(row.workspace_path),
@@ -188,6 +213,21 @@ function mapApproval(row: Row): ApprovalRecord {
   };
 }
 
+function mapBot(row: Row): BotProfileRecord {
+  return {
+    id: asString(row.id),
+    name: asString(row.name),
+    description: asString(row.description),
+    instructions: asString(row.instructions),
+    agent: asString(row.agent),
+    model: asNullableString(row.model),
+    workspacePath: asNullableString(row.workspace_path),
+    enabled: Number(row.enabled ?? 0) === 1,
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
 export class FinalBotDatabase {
   readonly db: Database;
 
@@ -201,6 +241,19 @@ export class FinalBotDatabase {
 
   private migrate(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS bot_profiles (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        instructions TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        model TEXT,
+        workspace_path TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         channel TEXT NOT NULL,
@@ -208,6 +261,7 @@ export class FinalBotDatabase {
         external_id TEXT NOT NULL,
         conversation_kind TEXT NOT NULL,
         title TEXT,
+        active_bot_id TEXT NOT NULL DEFAULT 'coder',
         metadata_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -218,6 +272,7 @@ export class FinalBotDatabase {
         id TEXT PRIMARY KEY,
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         external_message_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL DEFAULT 'coder',
         sender_id TEXT NOT NULL,
         text TEXT NOT NULL,
         raw_json TEXT NOT NULL DEFAULT '{}',
@@ -239,8 +294,12 @@ export class FinalBotDatabase {
         conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
         prompt TEXT NOT NULL,
         requested_by TEXT,
+        bot_id TEXT NOT NULL DEFAULT 'coder',
+        bot_name TEXT NOT NULL DEFAULT 'Coder',
+        bot_instructions TEXT,
         state TEXT NOT NULL,
         agent TEXT NOT NULL,
+        model TEXT,
         native_thread_id TEXT,
         native_turn_id TEXT,
         workspace_path TEXT,
@@ -311,12 +370,23 @@ export class FinalBotDatabase {
         ON run_events(created_at);
     `);
     this.ensureColumn("runs", "requested_by", "TEXT");
+    this.ensureColumn("runs", "bot_id", "TEXT NOT NULL DEFAULT 'coder'");
+    this.ensureColumn("runs", "bot_name", "TEXT NOT NULL DEFAULT 'Coder'");
+    this.ensureColumn("runs", "bot_instructions", "TEXT");
+    this.ensureColumn("runs", "model", "TEXT");
+    this.ensureColumn("conversations", "active_bot_id", "TEXT NOT NULL DEFAULT 'coder'");
+    this.ensureColumn("inbox_items", "bot_id", "TEXT NOT NULL DEFAULT 'coder'");
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_inbox_conversation_bot
+        ON inbox_items(conversation_id, bot_id, status, received_at);
+    `);
     this.ensureColumn("approval_requests", "can_accept_for_session", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("inbox_items", "error", "TEXT");
+    this.seedDefaultBot();
   }
 
   private ensureColumn(
-    table: "runs" | "approval_requests" | "inbox_items",
+    table: "runs" | "approval_requests" | "inbox_items" | "conversations",
     column: string,
     definition: string,
   ): void {
@@ -325,8 +395,97 @@ export class FinalBotDatabase {
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
+  private seedDefaultBot(): void {
+    const now = nowIso();
+    this.db
+      .query(
+        `INSERT INTO bot_profiles
+          (id, name, description, instructions, agent, model, workspace_path, enabled, created_at, updated_at)
+         VALUES ('coder', 'Coder', 'General-purpose coding and repository assistant.',
+           'Act as the coding agent for this conversation. Work directly in the provided repository, inspect before changing, make focused changes, and report concrete results.', 'codex', NULL, NULL, 1, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
+      )
+      .run(now, now);
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  getBotProfile(id: string): BotProfileRecord | null {
+    const row = this.db
+      .query("SELECT * FROM bot_profiles WHERE id = ?")
+      .get(id.toLowerCase()) as Row | null;
+    return row ? mapBot(row) : null;
+  }
+
+  listBotProfiles(includeDisabled = false): BotProfileRecord[] {
+    const rows = this.db
+      .query(
+        `SELECT * FROM bot_profiles
+         ${includeDisabled ? "" : "WHERE enabled = 1"}
+         ORDER BY name COLLATE NOCASE ASC`,
+      )
+      .all() as Row[];
+    return rows.map(mapBot);
+  }
+
+  upsertBotProfile(input: {
+    id: string;
+    name: string;
+    description: string;
+    instructions: string;
+    agent: string;
+    model?: string | null;
+    workspacePath?: string | null;
+    enabled?: boolean;
+  }): BotProfileRecord {
+    const id = input.id.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9_-]{0,47}$/.test(id)) {
+      throw new Error("Bot id must use lowercase letters, numbers, '-' or '_'.");
+    }
+    const now = nowIso();
+    this.db
+      .query(
+        `INSERT INTO bot_profiles
+          (id, name, description, instructions, agent, model, workspace_path, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name,
+           description = excluded.description,
+           instructions = excluded.instructions,
+           agent = excluded.agent,
+           model = excluded.model,
+           workspace_path = excluded.workspace_path,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        id,
+        input.name.trim(),
+        input.description.trim(),
+        input.instructions.trim(),
+        input.agent,
+        input.model ?? null,
+        input.workspacePath ?? null,
+        input.enabled === false ? 0 : 1,
+        now,
+        now,
+      );
+    const record = this.getBotProfile(id);
+    if (!record) throw new Error("Bot profile write failed");
+    return record;
+  }
+
+  setConversationActiveBot(conversationId: string, botId: string): ConversationRecord {
+    const bot = this.getBotProfile(botId);
+    if (!bot?.enabled) throw new Error(`Bot is not available: ${botId}`);
+    this.db
+      .query("UPDATE conversations SET active_bot_id = ?, updated_at = ? WHERE id = ?")
+      .run(bot.id, nowIso(), conversationId);
+    const updated = this.getConversation(conversationId);
+    if (!updated) throw new Error("Conversation not found after bot selection");
+    return updated;
   }
 
   getConversationByExternal(
@@ -349,6 +508,7 @@ export class FinalBotDatabase {
     externalId: string;
     conversationKind: ConversationKind;
     title?: string | null;
+    activeBotId?: string;
     metadata?: Record<string, unknown>;
   }): ConversationRecord {
     const existing = this.getConversationByExternal(
@@ -361,12 +521,13 @@ export class FinalBotDatabase {
       this.db
         .query(
           `UPDATE conversations
-           SET conversation_kind = ?, title = ?, metadata_json = ?, updated_at = ?
+           SET conversation_kind = ?, title = ?, active_bot_id = ?, metadata_json = ?, updated_at = ?
            WHERE id = ?`,
         )
         .run(
           input.conversationKind,
           input.title ?? existing.title,
+          input.activeBotId ?? existing.activeBotId,
           JSON.stringify(input.metadata ?? existing.metadata),
           now,
           existing.id,
@@ -375,6 +536,7 @@ export class FinalBotDatabase {
         ...existing,
         conversationKind: input.conversationKind,
         title: input.title ?? existing.title,
+        activeBotId: input.activeBotId ?? existing.activeBotId,
         metadata: input.metadata ?? existing.metadata,
         updatedAt: now,
       };
@@ -387,6 +549,7 @@ export class FinalBotDatabase {
       externalId: input.externalId,
       conversationKind: input.conversationKind,
       title: input.title ?? null,
+      activeBotId: input.activeBotId ?? "coder",
       metadata: input.metadata ?? {},
       createdAt: now,
       updatedAt: now,
@@ -394,8 +557,8 @@ export class FinalBotDatabase {
     this.db
       .query(
         `INSERT INTO conversations
-          (id, channel, account_id, external_id, conversation_kind, title, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, channel, account_id, external_id, conversation_kind, title, active_bot_id, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -404,6 +567,7 @@ export class FinalBotDatabase {
         record.externalId,
         record.conversationKind,
         record.title,
+        record.activeBotId,
         JSON.stringify(record.metadata),
         record.createdAt,
         record.updatedAt,
@@ -416,20 +580,24 @@ export class FinalBotDatabase {
     return row ? mapConversation(row) : null;
   }
 
-  getLatestConversationSession(conversationId: string): { nativeThreadId: string | null } | null {
+  getLatestConversationSession(
+    conversationId: string,
+    botId: string,
+  ): { nativeThreadId: string | null } | null {
     const row = this.db
       .query(
         `SELECT native_thread_id FROM runs
-         WHERE conversation_id = ? AND native_thread_id IS NOT NULL
+         WHERE conversation_id = ? AND bot_id = ? AND native_thread_id IS NOT NULL
          ORDER BY created_at DESC LIMIT 1`,
       )
-      .get(conversationId) as Row | null;
+      .get(conversationId, botId) as Row | null;
     return row ? { nativeThreadId: asNullableString(row.native_thread_id) } : null;
   }
 
   admitInbound(input: {
     conversationId: string;
     externalMessageId: string;
+    botId?: string;
     senderId: string;
     text: string;
     raw: unknown;
@@ -450,6 +618,7 @@ export class FinalBotDatabase {
       id: createId("inbox"),
       conversationId: input.conversationId,
       externalMessageId: input.externalMessageId,
+      botId: input.botId ?? "coder",
       senderId: input.senderId,
       text: input.text,
       raw: input.raw,
@@ -461,13 +630,14 @@ export class FinalBotDatabase {
     this.db
       .query(
         `INSERT INTO inbox_items
-          (id, conversation_id, external_message_id, sender_id, text, raw_json, status, received_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+          (id, conversation_id, external_message_id, bot_id, sender_id, text, raw_json, status, received_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       )
       .run(
         item.id,
         item.conversationId,
         item.externalMessageId,
+        item.botId,
         item.senderId,
         item.text,
         JSON.stringify(item.raw),
@@ -477,14 +647,14 @@ export class FinalBotDatabase {
     return { item, duplicate: false };
   }
 
-  getPendingInbox(conversationId: string): InboxRecord[] {
+  getPendingInbox(conversationId: string, botId?: string): InboxRecord[] {
     const rows = this.db
       .query(
         `SELECT * FROM inbox_items
-         WHERE conversation_id = ? AND status = 'pending'
+         WHERE conversation_id = ? AND status = 'pending' ${botId ? "AND bot_id = ?" : ""}
          ORDER BY received_at ASC, created_at ASC`,
       )
-      .all(conversationId) as Row[];
+      .all(...(botId ? [conversationId, botId] : [conversationId])) as Row[];
     return rows.map(mapInbox);
   }
 
@@ -548,11 +718,49 @@ export class FinalBotDatabase {
     };
   }
 
+  recoverQueueAfterRestart(): {
+    failed: number;
+    queues: Array<{ conversationId: string; botId: string }>;
+  } {
+    const failed = this.db.transaction(() => {
+      const running = this.db
+        .query("SELECT id FROM inbox_items WHERE status = 'running'")
+        .all() as Row[];
+      const update = this.db.query(
+        "UPDATE inbox_items SET status = 'failed', error = ? WHERE id = ?",
+      );
+      for (const row of running) {
+        update.run("FinalBot restarted while this message was executing.", asString(row.id));
+      }
+      return running.length;
+    })();
+    const queues = this.db
+      .query(
+        `SELECT conversation_id, bot_id
+         FROM inbox_items
+         WHERE status = 'pending'
+         GROUP BY conversation_id, bot_id
+         ORDER BY MIN(created_at) ASC`,
+      )
+      .all() as Row[];
+    return {
+      failed,
+      queues: queues.map((row) => ({
+        conversationId: asString(row.conversation_id),
+        botId: asString(row.bot_id, "coder"),
+      })),
+    };
+  }
+
   createRun(input: {
     conversationId: string;
     prompt: string;
     requestedBy?: string | null;
+    botId: string;
+    botName: string;
+    botInstructions?: string | null;
     agent: string;
+    model?: string | null;
     replyTarget?: OneBotReplyTarget | WebReplyTarget | null;
   }): RunRecord {
     const now = nowIso();
@@ -561,8 +769,12 @@ export class FinalBotDatabase {
       conversationId: input.conversationId,
       prompt: input.prompt,
       requestedBy: input.requestedBy ?? null,
+      botId: input.botId,
+      botName: input.botName,
+      botInstructions: input.botInstructions ?? null,
       state: "admitted",
       agent: input.agent,
+      model: input.model ?? null,
       nativeThreadId: null,
       nativeTurnId: null,
       workspacePath: null,
@@ -577,17 +789,21 @@ export class FinalBotDatabase {
     this.db
       .query(
         `INSERT INTO runs
-          (id, conversation_id, prompt, requested_by, state, agent, native_thread_id, native_turn_id,
+          (id, conversation_id, prompt, requested_by, bot_id, bot_name, bot_instructions, state, agent, model, native_thread_id, native_turn_id,
            workspace_path, output, error, reply_target_json, created_at, updated_at, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '', NULL, ?, ?, ?, NULL, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, '', NULL, ?, ?, ?, NULL, NULL)`,
       )
       .run(
         record.id,
         record.conversationId,
         record.prompt,
         record.requestedBy,
+        record.botId,
+        record.botName,
+        record.botInstructions,
         record.state,
         record.agent,
+        record.model,
         record.replyTarget ? JSON.stringify(record.replyTarget) : null,
         record.createdAt,
         record.updatedAt,

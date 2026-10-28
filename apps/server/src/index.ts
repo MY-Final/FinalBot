@@ -50,6 +50,19 @@ export function createApp(
     return c.json(rows.map(toRunSummary));
   });
 
+  app.get("/api/bots", (c) => {
+    return c.json(
+      db.listBotProfiles().map((bot) => ({
+        id: bot.id,
+        name: bot.name,
+        description: bot.description,
+        agent: bot.agent,
+        model: bot.model,
+        enabled: bot.enabled,
+      })),
+    );
+  });
+
   app.get("/api/runs/:id", (c) => {
     const run = db.getRun(c.req.param("id"));
     if (!run) return c.json({ error: "not_found", message: "Run not found" }, 404);
@@ -72,6 +85,7 @@ export function createApp(
 
   const createRunSchema = z.object({
     prompt: z.string().trim().min(1).max(50_000),
+    botId: z.string().trim().min(1).max(48).optional(),
   });
 
   app.post("/api/runs", async (c) => {
@@ -80,7 +94,7 @@ export function createApp(
       return c.json({ error: "invalid_request", message: parsed.error.message }, 400);
     }
     try {
-      const run = await runs.createWebRun(parsed.data.prompt);
+      const run = await runs.createWebRun(parsed.data.prompt, parsed.data.botId);
       return c.json(toRunSummary(run), 201);
     } catch (error) {
       return c.json(
@@ -314,7 +328,10 @@ function toRunSummary(run: ReturnType<FinalBotDatabase["getRun"]> & {}) {
     state: run.state,
     prompt: run.prompt,
     requestedBy: run.requestedBy,
+    botId: run.botId,
+    botName: run.botName,
     agent: run.agent,
+    model: run.model,
     output: run.output,
     error: run.error,
     nativeThreadId: run.nativeThreadId,

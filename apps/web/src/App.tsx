@@ -1,11 +1,12 @@
 import type {
   ApprovalSummary,
+  BotSummary,
   HealthResponse,
   RunDetail,
   RunSummary,
   ServerEvent,
 } from "@finalbot/protocol";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, subscribeEvents } from "./api";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -39,6 +40,8 @@ function shorten(value: string, max = 72): string {
 
 export function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [bots, setBots] = useState<BotSummary[]>([]);
+  const [selectedBotId, setSelectedBotId] = useState("coder");
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -61,11 +64,57 @@ export function App() {
         setSelectedId((current) => current ?? items[0]?.id ?? null);
       })
       .catch((cause: unknown) => setError(String(cause)));
+    void api
+      .bots()
+      .then((items) => {
+        setBots(items);
+        setSelectedBotId((current) =>
+          items.some((bot) => bot.id === current) ? current : (items[0]?.id ?? "coder"),
+        );
+      })
+      .catch((cause: unknown) => setError(String(cause)));
   }, []);
 
+  const applyEvent = useCallback(
+    (event: ServerEvent): void => {
+      if (event.type === "run.updated") {
+        setRuns((current) => {
+          const index = current.findIndex((run) => run.id === event.run.id);
+          const next = index >= 0 ? [...current] : [event.run, ...current];
+          if (index >= 0) next[index] = event.run;
+          return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        });
+        if (event.run.id === selectedId) {
+          setDetail((current) => (current ? { ...current, ...event.run } : current));
+        }
+        return;
+      }
+      if (event.type === "run.delta" && event.runId === selectedId) {
+        setLiveOutput((current) => `${current}${event.text}`);
+        return;
+      }
+      if (event.type === "approval.requested" || event.type === "approval.resolved") {
+        if (event.approval.runId !== selectedId) return;
+        setDetail((current) => {
+          if (!current) return current;
+          const approvals = current.approvals.filter(
+            (item) => item.requestId !== event.approval.requestId,
+          );
+          approvals.push(event.approval);
+          return { ...current, approvals };
+        });
+        return;
+      }
+      if (event.type === "system" && event.level !== "info") {
+        setError(event.message);
+      }
+    },
+    [selectedId],
+  );
+
   useEffect(() => {
-    return subscribeEvents((event) => applyEvent(event), setConnected);
-  }, [selectedId]);
+    return subscribeEvents(applyEvent, setConnected);
+  }, [applyEvent]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -89,6 +138,7 @@ export function App() {
     };
   }, [selectedId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: liveOutput intentionally triggers scrolling.
   useEffect(() => {
     if (outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight;
@@ -102,47 +152,13 @@ export function App() {
   const selected = runs.find((run) => run.id === selectedId) ?? detail ?? null;
   const activeCount = runs.filter((run) => !TERMINAL.has(run.state)).length;
 
-  function applyEvent(event: ServerEvent): void {
-    if (event.type === "run.updated") {
-      setRuns((current) => {
-        const index = current.findIndex((run) => run.id === event.run.id);
-        const next = index >= 0 ? [...current] : [event.run, ...current];
-        if (index >= 0) next[index] = event.run;
-        return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      });
-      if (event.run.id === selectedId) {
-        setDetail((current) => (current ? { ...current, ...event.run } : current));
-      }
-      return;
-    }
-    if (event.type === "run.delta" && event.runId === selectedId) {
-      setLiveOutput((current) => `${current}${event.text}`);
-      return;
-    }
-    if (event.type === "approval.requested" || event.type === "approval.resolved") {
-      if (event.approval.runId !== selectedId) return;
-      setDetail((current) => {
-        if (!current) return current;
-        const approvals = current.approvals.filter(
-          (item) => item.requestId !== event.approval.requestId,
-        );
-        approvals.push(event.approval);
-        return { ...current, approvals };
-      });
-      return;
-    }
-    if (event.type === "system" && event.level !== "info") {
-      setError(event.message);
-    }
-  }
-
   async function submit(): Promise<void> {
     const value = prompt.trim();
     if (!value || submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      const run = await api.createRun(value);
+      const run = await api.createRun(value, selectedBotId);
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
       setSelectedId(run.id);
       setPrompt("");
@@ -206,6 +222,19 @@ export function App() {
 
           <div className="composer">
             <label htmlFor="new-run">派发新任务</label>
+            <fieldset className="bot-picker" aria-label="选择 Bot">
+              {bots.map((bot) => (
+                <button
+                  type="button"
+                  key={bot.id}
+                  className={bot.id === selectedBotId ? "is-active" : ""}
+                  onClick={() => setSelectedBotId(bot.id)}
+                  title={bot.description}
+                >
+                  {bot.name}
+                </button>
+              ))}
+            </fieldset>
             <textarea
               id="new-run"
               value={prompt}
@@ -234,7 +263,7 @@ export function App() {
             </div>
           </div>
 
-          <div className="run-list" aria-label="运行列表">
+          <div className="run-list">
             {runs.length === 0 ? (
               <div className="empty-queue">
                 <span className="empty-glyph">∅</span>
@@ -258,7 +287,9 @@ export function App() {
                   </div>
                   <strong>{shorten(run.prompt, 56)}</strong>
                   <div className="run-card-bottom">
-                    <span>{run.agent}</span>
+                    <span>
+                      {run.botName} / {run.agent}
+                    </span>
                     <span className="run-id">{run.id.slice(-8)}</span>
                   </div>
                 </button>
@@ -288,7 +319,7 @@ export function App() {
               <div className="workbench-head">
                 <div>
                   <div className="breadcrumb">
-                    RUN / {selected.id.slice(-8).toUpperCase()} / {selected.agent.toUpperCase()}
+                    RUN / {selected.id.slice(-8).toUpperCase()} / {selected.botName.toUpperCase()}
                   </div>
                   <h2>{shorten(selected.prompt, 110)}</h2>
                 </div>
@@ -342,8 +373,16 @@ export function App() {
                         <dd>{STATE_LABEL[selected.state] ?? selected.state}</dd>
                       </div>
                       <div>
+                        <dt>Bot</dt>
+                        <dd>{selected.botName}</dd>
+                      </div>
+                      <div>
                         <dt>Agent</dt>
                         <dd>{selected.agent}</dd>
+                      </div>
+                      <div>
+                        <dt>模型</dt>
+                        <dd>{selected.model ?? "默认模型"}</dd>
                       </div>
                       <div>
                         <dt>开始</dt>

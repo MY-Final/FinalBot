@@ -1,5 +1,6 @@
 import type {
   ApprovalSummary,
+  BotSummary,
   HealthResponse,
   RunDetail,
   RunSummary,
@@ -21,16 +22,16 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthResponse>("/api/health"),
+  bots: () => request<BotSummary[]>("/api/bots"),
   runs: () => request<RunSummary[]>("/api/runs"),
   run: (id: string) => request<RunDetail>(`/api/runs/${id}`),
-  createRun: (prompt: string) =>
+  createRun: (prompt: string, botId?: string) =>
     request<RunSummary>("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ prompt, ...(botId ? { botId } : {}) }),
     }),
-  interrupt: (id: string) =>
-    request<void>(`/api/runs/${id}/interrupt`, { method: "POST" }),
+  interrupt: (id: string) => request<void>(`/api/runs/${id}/interrupt`, { method: "POST" }),
   resolveApproval: (id: string, action: ApprovalSummary["status"] | string) =>
     request<ApprovalSummary>(`/api/approvals/${id}/resolve`, {
       method: "POST",
@@ -55,4 +56,3 @@ export function subscribeEvents(
   };
   return () => source.close();
 }
-

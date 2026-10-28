@@ -92,6 +92,7 @@ export class RunService {
     const admitted = this.db.admitInbound({
       conversationId: conversation.id,
       externalMessageId: message.externalMessageId,
+      botId: conversation.activeBotId,
       senderId: message.senderId,
       text: message.text,
       raw: message.raw,
@@ -128,6 +129,9 @@ export class RunService {
           "/approve_session [审批ID] - 本会话允许",
           "/deny [审批ID] - 拒绝",
           "/cancel - 中断当前任务",
+          "/bots - 查看可用 Bot",
+          "/use <bot> - 切换当前会话 Bot",
+          "/bot <bot> <任务> - 本次派发给指定 Bot",
         ].join("\n"),
       );
       return;
@@ -145,6 +149,18 @@ export class RunService {
     }
     if (command.kind === "cancel") {
       await this.cancelForConversation(context);
+      return;
+    }
+    if (command.kind === "bots") {
+      await this.sendBots(context);
+      return;
+    }
+    if (command.kind === "use") {
+      await this.useBot(context, command.bot);
+      return;
+    }
+    if (command.kind === "bot") {
+      await this.dispatchToBot(message, command.bot, command.prompt);
       return;
     }
     const requestId = "requestId" in command ? command.requestId : undefined;
@@ -190,6 +206,72 @@ export class RunService {
     }
   }
 
+  private async sendBots(context: ReplyContext): Promise<void> {
+    const conversation = this.db.getConversation(context.conversationId);
+    if (!conversation) return;
+    const bots = this.db.listBotProfiles();
+    if (bots.length === 0) {
+      await this.reply(context.replyTarget, "当前没有启用的 Bot。");
+      return;
+    }
+    const lines = [
+      "可用 Bot",
+      ...bots.map(
+        (bot) =>
+          `${bot.id === conversation.activeBotId ? "*" : "-"} ${bot.id} / ${bot.name} / ${bot.agent}${
+            bot.description ? ` - ${bot.description}` : ""
+          }`,
+      ),
+      "",
+      `当前：${conversation.activeBotId}`,
+      "使用 /use <bot> 切换，或 /bot <bot> <任务> 单次派发。",
+    ];
+    await this.reply(context.replyTarget, lines.join("\n"));
+  }
+
+  private async useBot(context: ReplyContext, botId: string): Promise<void> {
+    const bot = this.db.getBotProfile(botId);
+    if (!bot?.enabled) {
+      await this.reply(context.replyTarget, `Bot 不存在或未启用：${botId}`);
+      return;
+    }
+    if (this.activeConversations.has(context.conversationId)) {
+      await this.reply(context.replyTarget, "当前会话还有任务正在执行，请等任务结束后再切换 Bot。");
+      return;
+    }
+    this.db.setConversationActiveBot(context.conversationId, bot.id);
+    await this.reply(context.replyTarget, `当前会话已切换到：${bot.name} (${bot.id})`);
+  }
+
+  private async dispatchToBot(
+    message: InboundMessage,
+    botId: string,
+    prompt: string,
+  ): Promise<void> {
+    const bot = this.db.getBotProfile(botId);
+    if (!bot?.enabled) {
+      await this.reply(message.replyTarget, `Bot 不存在或未启用：${botId}`);
+      return;
+    }
+    const conversation = this.db.getConversationByExternal(
+      message.channel,
+      message.accountId,
+      message.externalConversationId,
+    );
+    if (!conversation) return;
+    const admitted = this.db.admitInbound({
+      conversationId: conversation.id,
+      externalMessageId: message.externalMessageId,
+      botId: bot.id,
+      senderId: message.senderId,
+      text: prompt,
+      raw: message.raw,
+      receivedAt: message.receivedAt,
+    });
+    if (admitted.duplicate || this.closed) return;
+    this.scheduleConversation(conversation.id);
+  }
+
   private async sendStatus(context: ReplyContext): Promise<void> {
     const run = this.db.getLatestRun(context.conversationId);
     if (!run) {
@@ -205,7 +287,9 @@ export class RunService {
     const approvals = this.db.listPendingApprovals(run.id);
     const lines = [
       `任务：${run.id}`,
+      `Bot：${run.botName} (${run.botId})`,
       `状态：${run.state}`,
+      run.model ? `模型：${run.model}` : null,
       run.workspacePath ? `工作区：${run.workspacePath}` : null,
       run.error ? `错误：${run.error}` : null,
       approvals.length > 0
@@ -313,7 +397,6 @@ export class RunService {
   }
 
   private scheduleConversation(conversationId: string): void {
-    if (this.activeConversations.has(conversationId)) return;
     const existing = this.debounceTimers.get(conversationId);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
@@ -330,26 +413,45 @@ export class RunService {
       this.scheduleConversation(conversationId);
       return;
     }
-    const items = this.db.getPendingInbox(conversationId);
+    const first = this.db.getPendingInbox(conversationId)[0];
+    if (!first) return;
+    const items = this.db.getPendingInbox(conversationId, first.botId);
     if (items.length === 0) return;
-    this.activeConversations.add(conversationId);
-    const ids = items.map((item) => item.id);
-    this.db.markInboxRunning(ids);
-
-    const prompt = items.map((item) => item.text).join("\n");
+    const bot = this.db.getBotProfile(first.botId);
     const conversation = this.db.getConversation(conversationId);
     const replyTarget =
       conversation && typeof conversation.metadata.replyTarget === "object"
         ? (conversation.metadata.replyTarget as ReplyTarget)
         : null;
+    if (!bot?.enabled) {
+      const ids = items.map((item) => item.id);
+      this.db.markInboxFailed(ids);
+      if (replyTarget) {
+        await this.reply(replyTarget, `Bot 不存在或未启用：${first.botId}`);
+      }
+      // Give another bot's pending queue a fresh scheduling turn.
+      if (!this.closed && this.db.getPendingInbox(conversationId).length > 0) {
+        this.scheduleConversation(conversationId);
+      }
+      return;
+    }
+    this.activeConversations.add(conversationId);
+    const ids = items.map((item) => item.id);
+    this.db.markInboxRunning(ids);
+
+    const prompt = items.map((item) => item.text).join("\n");
     const run = this.db.createRun({
       conversationId,
       prompt,
       requestedBy: items.at(-1)?.senderId ?? null,
-      agent: "codex",
+      botId: bot.id,
+      botName: bot.name,
+      botInstructions: bot.instructions,
+      agent: bot.agent,
+      model: bot.model ?? this.config.codex.model,
       replyTarget,
     });
-    const session = this.db.getLatestConversationSession(conversationId);
+    const session = this.db.getLatestConversationSession(conversationId, bot.id);
     if (session?.nativeThreadId) {
       this.db.updateRun(run.id, { nativeThreadId: session.nativeThreadId });
     }
@@ -379,9 +481,13 @@ export class RunService {
     }
   }
 
-  async createWebRun(prompt: string): Promise<RunRecord> {
+  async createWebRun(prompt: string, botId = "coder"): Promise<RunRecord> {
     if (!this.workspace) {
       throw new Error("FINALBOT_REPO_PATH is not configured");
+    }
+    const bot = this.db.getBotProfile(botId);
+    if (!bot?.enabled) {
+      throw new Error(`Bot 不存在或未启用：${botId}`);
     }
     const conversation = this.db.upsertConversation({
       channel: "web",
@@ -395,7 +501,11 @@ export class RunService {
       conversationId: conversation.id,
       prompt,
       requestedBy: "web:local",
-      agent: "codex",
+      botId: bot.id,
+      botName: bot.name,
+      botInstructions: bot.instructions,
+      agent: bot.agent,
+      model: bot.model ?? this.config.codex.model,
       replyTarget: { kind: "web" },
     });
     this.publishRun(run);
@@ -411,6 +521,15 @@ export class RunService {
       const failed = this.db.updateRun(run.id, {
         state: "failed",
         error: "FINALBOT_REPO_PATH is not configured",
+        finishedAt: nowIso(),
+      });
+      this.publishRun(failed);
+      return failed;
+    }
+    if (run.agent !== "codex") {
+      const failed = this.db.updateRun(run.id, {
+        state: "failed",
+        error: `Agent is not supported yet: ${run.agent}`,
         finishedAt: nowIso(),
       });
       this.publishRun(failed);
@@ -454,7 +573,8 @@ export class RunService {
           prompt: run.prompt,
           cwd: worktree.path,
           ...(current.nativeThreadId ? { nativeThreadId: current.nativeThreadId } : {}),
-          ...(this.config.codex.model ? { model: this.config.codex.model } : {}),
+          ...(run.model ? { model: run.model } : {}),
+          ...(run.botInstructions ? { developerInstructions: run.botInstructions } : {}),
           sandbox: this.config.codex.sandbox,
         },
         {
@@ -679,7 +799,10 @@ export class RunService {
         state: run.state,
         prompt: run.prompt,
         requestedBy: run.requestedBy,
+        botId: run.botId,
+        botName: run.botName,
         agent: run.agent,
+        model: run.model,
         output: run.output,
         error: run.error,
         nativeThreadId: run.nativeThreadId,
@@ -718,17 +841,17 @@ export class RunService {
 
   async recover(): Promise<void> {
     const recoveredRuns = this.db.recoverActiveRuns();
-    const inbox = this.db.recoverInboxAfterRestart();
+    const inbox = this.db.recoverQueueAfterRestart();
     for (const run of recoveredRuns) this.publishRun(run);
     if (recoveredRuns.length > 0 || inbox.failed > 0) {
       this.emitEvent(null, {
         type: "system",
         level: "warning",
-        message: `Recovered after restart: ${recoveredRuns.length} run(s) interrupted, ${inbox.failed} message(s) marked failed, ${inbox.conversations.length} conversation(s) requeued.`,
+        message: `Recovered after restart: ${recoveredRuns.length} run(s) interrupted, ${inbox.failed} message(s) marked failed, ${inbox.queues.length} conversation/bot queue(s) requeued.`,
         at: nowIso(),
       });
     }
-    for (const conversationId of inbox.conversations) {
+    for (const conversationId of new Set(inbox.queues.map((queue) => queue.conversationId))) {
       this.scheduleConversation(conversationId);
     }
     await this.flushOutbox();

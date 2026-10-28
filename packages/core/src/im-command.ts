@@ -5,7 +5,18 @@ export type ImCommand =
       requestId?: string;
     }
   | {
-      kind: "cancel" | "status" | "help" | "unknown";
+      kind: "use";
+      raw: string;
+      bot: string;
+    }
+  | {
+      kind: "bot";
+      raw: string;
+      bot: string;
+      prompt: string;
+    }
+  | {
+      kind: "bots" | "cancel" | "status" | "help" | "unknown";
       raw: string;
     };
 
@@ -22,9 +33,6 @@ export function parseImCommand(input: string): ImCommand | null {
 
   const name = (match[1] ?? "").toLowerCase();
   const argument = (match[2] ?? "").trim();
-  if (argument && /\s/.test(argument)) {
-    return { kind: "unknown", raw: text };
-  }
 
   switch (name) {
     case "approve":
@@ -41,12 +49,21 @@ export function parseImCommand(input: string): ImCommand | null {
     case "cancel":
     case "stop":
     case "interrupt":
-      return { kind: "cancel", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "cancel", raw: text };
     case "status":
     case "state":
-      return { kind: "status", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "status", raw: text };
     case "help":
-      return { kind: "help", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "help", raw: text };
+    case "bots":
+    case "botlist":
+      return argument ? { kind: "unknown", raw: text } : { kind: "bots", raw: text };
+    case "use":
+      return argument && !/\s/.test(argument)
+        ? { kind: "use", bot: argument, raw: text }
+        : { kind: "unknown", raw: text };
+    case "bot":
+      return parseBotDispatch(argument, text);
     case "允许":
       return withOptionalRequestId("approve", argument, text);
     case "允许本会话":
@@ -56,14 +73,35 @@ export function parseImCommand(input: string): ImCommand | null {
     case "取消":
     case "停止":
     case "中断":
-      return { kind: "cancel", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "cancel", raw: text };
     case "状态":
-      return { kind: "status", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "status", raw: text };
     case "帮助":
-      return { kind: "help", raw: text };
+      return argument ? { kind: "unknown", raw: text } : { kind: "help", raw: text };
+    case "机器人":
+      return argument ? { kind: "unknown", raw: text } : { kind: "bots", raw: text };
+    case "使用":
+      return argument && !/\s/.test(argument)
+        ? { kind: "use", bot: argument, raw: text }
+        : { kind: "unknown", raw: text };
+    case "派发":
+      return parseBotDispatch(argument, text);
     default:
       return { kind: "unknown", raw: text };
   }
+}
+
+function parseBotDispatch(argument: string, raw: string): ImCommand {
+  const match = /^(\S+)\s+([\s\S]+)$/.exec(argument);
+  if (!match?.[1] || !match[2]?.trim()) {
+    return { kind: "unknown", raw };
+  }
+  return {
+    kind: "bot",
+    bot: match[1],
+    prompt: match[2].trim(),
+    raw,
+  };
 }
 
 export function stripLeadingMentions(input: string): string {
@@ -88,5 +126,6 @@ function withOptionalRequestId(
   requestId: string,
   raw: string,
 ): ImCommand {
+  if (/\s/.test(requestId)) return { kind: "unknown", raw };
   return requestId ? { kind, requestId, raw } : { kind, raw };
 }

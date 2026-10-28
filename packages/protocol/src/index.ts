@@ -5,7 +5,10 @@ export interface RunSummary {
   state: RunState;
   prompt: string;
   requestedBy: string | null;
+  botId: string;
+  botName: string;
   agent: string;
+  model: string | null;
   output: string;
   error: string | null;
   nativeThreadId: string | null;
@@ -87,6 +90,16 @@ export interface HealthResponse {
 
 export interface CreateRunRequest {
   prompt: string;
+  botId?: string;
+}
+
+export interface BotSummary {
+  id: string;
+  name: string;
+  description: string;
+  agent: string;
+  model: string | null;
+  enabled: boolean;
 }
 
 export interface ResolveApprovalRequest extends ApprovalDecision {}

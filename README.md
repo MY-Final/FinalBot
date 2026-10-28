@@ -16,6 +16,7 @@ NapCat / OneBot v11 -> FinalBot -> Git worktree -> Codex app-server -> web conso
 - SQLite WAL persistence with inbox, run, phase, approval, cursor and outbox tables
 - Durable event log with SSE replay after `Last-Event-ID`
 - OneBot v11 WebSocket adapter for private and group messages
+- Bot profiles with per-conversation routing and isolated agent threads
 - Codex app-server JSON-RPC adapter with streaming, approval and interrupt
 - Isolated Git worktree per run
 - Responsive React console with live execution, approvals and checkpoints
@@ -74,11 +75,19 @@ Commands are handled immediately and never become agent prompts or Inbox items:
 /approve_session [approval-id]
 /deny [approval-id]
 /cancel
+/bots
+/use <bot>
+/bot <bot> <task>
 ```
 
 `/approve`, `/approve_session`, and `/deny` operate on the conversation's oldest pending
 approval when no ID is supplied. Approval IDs are shown in the notification. Only the sender
 who started a run may approve, deny, inspect, or interrupt it.
+
+`/bots` lists enabled bot profiles. `/use <bot>` changes the default bot for the current
+conversation, while `/bot <bot> <task>` dispatches one message to a specific bot without
+changing it. A bot binds its own instructions, agent, model, and native thread; queued
+messages keep that binding even if the conversation switches bots afterward.
 
 ## Commands
 
