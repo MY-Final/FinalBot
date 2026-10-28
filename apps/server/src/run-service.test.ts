@@ -389,6 +389,8 @@ describe("durable messages and workspace modes", () => {
         const run = env.db.getRun(first.id);
         return run?.state === "succeeded" ? run : null;
       });
+      expect(finished.toolRevision).toBe(1);
+      expect(finished.toolSnapshotHash).toBe("snapshot-a");
       await waitFor(() => (agent.inputs.length === 1 ? true : null));
 
       await service.createWebRun("second");

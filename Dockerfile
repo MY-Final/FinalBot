@@ -9,7 +9,9 @@ RUN bun run build
 
 FROM debian:bookworm-slim AS runtime
 ARG CODEX_VERSION=0.164.0
-RUN apt-get update \
+ARG DEBIAN_MIRROR=deb.debian.org
+RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+  && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git nodejs npm \
   && npm install --global "@openai/codex@${CODEX_VERSION}" \
   && npm cache clean --force \
