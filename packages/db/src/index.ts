@@ -11,7 +11,7 @@ import {
   type WorkspaceMode,
 } from "@finalbot/core";
 
-const DATABASE_SCHEMA_VERSION = 3;
+const DATABASE_SCHEMA_VERSION = 4;
 
 export interface ConversationRecord {
   id: string;
@@ -203,6 +203,30 @@ export interface McpServerRecord {
 
 export interface McpToolPolicyRecord {
   serverId: string;
+  toolName: string;
+  policy: "auto" | "ask" | "deny";
+}
+
+export type PluginStatus = "disabled" | "loading" | "active" | "error" | "missing";
+
+export interface PluginRecord {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string | null;
+  entryPath: string;
+  source: string;
+  enabled: boolean;
+  status: PluginStatus;
+  manifest: Record<string, unknown>;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PluginToolPolicyRecord {
+  pluginId: string;
   toolName: string;
   policy: "auto" | "ask" | "deny";
 }
@@ -757,6 +781,24 @@ function mapMcpServer(row: Row): McpServerRecord {
   };
 }
 
+function mapPlugin(row: Row): PluginRecord {
+  return {
+    id: asString(row.id),
+    name: asString(row.name),
+    version: asString(row.version, "unknown"),
+    description: asString(row.description),
+    author: asNullableString(row.author),
+    entryPath: asString(row.entry_path),
+    source: asString(row.source, "local"),
+    enabled: Number(row.enabled ?? 0) === 1,
+    status: asString(row.status, "disabled") as PluginStatus,
+    manifest: parseJson<Record<string, unknown>>(row.manifest_json, {}),
+    lastError: asNullableString(row.last_error),
+    createdAt: asString(row.created_at),
+    updatedAt: asString(row.updated_at),
+  };
+}
+
 function mapSchedule(row: Row): ScheduleRecord {
   return {
     id: asString(row.id),
@@ -1134,6 +1176,29 @@ export class FinalBotDatabase {
         PRIMARY KEY(server_id, tool_name)
       );
 
+      CREATE TABLE IF NOT EXISTS plugins (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        version TEXT NOT NULL,
+        description TEXT NOT NULL,
+        author TEXT,
+        entry_path TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'local',
+        enabled INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'disabled',
+        manifest_json TEXT NOT NULL DEFAULT '{}',
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS plugin_tool_policies (
+        plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        policy TEXT NOT NULL DEFAULT 'ask',
+        PRIMARY KEY(plugin_id, tool_name)
+      );
+
       CREATE TABLE IF NOT EXISTS code_executions (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -1249,6 +1314,8 @@ export class FinalBotDatabase {
         ON subagent_tasks(parent_run_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_agent_messages_source
         ON agent_messages(source_run_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_plugins_status
+        ON plugins(status, enabled, updated_at DESC);
     `);
     this.ensureColumn("runs", "requested_by", "TEXT");
     this.ensureColumn("runs", "bot_id", "TEXT NOT NULL DEFAULT 'coder'");
@@ -3659,6 +3726,136 @@ export class FinalBotDatabase {
       serverId: asString(row.server_id),
       toolName: asString(row.tool_name),
       policy: asString(row.policy, "ask") as McpToolPolicyRecord["policy"],
+    }));
+  }
+
+  listPlugins(): PluginRecord[] {
+    const rows = this.db
+      .query("SELECT * FROM plugins ORDER BY name COLLATE NOCASE ASC, id ASC")
+      .all() as Row[];
+    return rows.map(mapPlugin);
+  }
+
+  getPlugin(id: string): PluginRecord | null {
+    const row = this.db.query("SELECT * FROM plugins WHERE id = ?").get(id) as Row | null;
+    return row ? mapPlugin(row) : null;
+  }
+
+  upsertDiscoveredPlugin(input: {
+    id: string;
+    name: string;
+    version: string;
+    description: string;
+    author?: string | null;
+    entryPath: string;
+    source?: string;
+    manifest: Record<string, unknown>;
+    error?: string | null;
+  }): PluginRecord {
+    const existing = this.getPlugin(input.id);
+    const now = nowIso();
+    if (existing) {
+      const status = input.error ? "error" : existing.enabled ? existing.status : "disabled";
+      this.db
+        .query(
+          `UPDATE plugins SET
+             name = ?, version = ?, description = ?, author = ?, entry_path = ?,
+             source = ?, status = ?, manifest_json = ?, last_error = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.name,
+          input.version,
+          input.description,
+          input.author ?? null,
+          input.entryPath,
+          input.source ?? "local",
+          status,
+          JSON.stringify(input.manifest),
+          input.error ?? null,
+          now,
+          input.id,
+        );
+    } else {
+      this.db
+        .query(
+          `INSERT INTO plugins
+            (id, name, version, description, author, entry_path, source, enabled, status,
+             manifest_json, last_error, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.id,
+          input.name,
+          input.version,
+          input.description,
+          input.author ?? null,
+          input.entryPath,
+          input.source ?? "local",
+          input.error ? "error" : "disabled",
+          JSON.stringify(input.manifest),
+          input.error ?? null,
+          now,
+          now,
+        );
+    }
+    const record = this.getPlugin(input.id);
+    if (!record) throw new Error(`Plugin write failed: ${input.id}`);
+    return record;
+  }
+
+  setPluginEnabled(id: string, enabled: boolean): PluginRecord {
+    this.db
+      .query("UPDATE plugins SET enabled = ?, status = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, enabled ? "loading" : "disabled", nowIso(), id);
+    const record = this.getPlugin(id);
+    if (!record) throw new Error(`Plugin not found: ${id}`);
+    return record;
+  }
+
+  updatePluginStatus(id: string, status: PluginStatus, lastError: string | null = null): void {
+    this.db
+      .query("UPDATE plugins SET status = ?, last_error = ?, updated_at = ? WHERE id = ?")
+      .run(status, lastError, nowIso(), id);
+  }
+
+  setPluginToolPolicy(pluginId: string, toolName: string, policy: "auto" | "ask" | "deny"): void {
+    this.db
+      .query(
+        `INSERT INTO plugin_tool_policies (plugin_id, tool_name, policy)
+         VALUES (?, ?, ?)
+         ON CONFLICT(plugin_id, tool_name) DO UPDATE SET policy = excluded.policy`,
+      )
+      .run(pluginId, toolName, policy);
+  }
+
+  getPluginToolPolicy(pluginId: string, toolName: string): "auto" | "ask" | "deny" {
+    const row = this.db
+      .query("SELECT policy FROM plugin_tool_policies WHERE plugin_id = ? AND tool_name = ?")
+      .get(pluginId, toolName) as Row | null;
+    const policy = asString(row?.policy, "ask");
+    return policy === "auto" || policy === "deny" ? policy : "ask";
+  }
+
+  listPluginToolPolicies(pluginId?: string): PluginToolPolicyRecord[] {
+    const rows = pluginId
+      ? (this.db
+          .query(
+            `SELECT * FROM plugin_tool_policies
+             WHERE plugin_id = ?
+             ORDER BY tool_name COLLATE NOCASE ASC`,
+          )
+          .all(pluginId) as Row[])
+      : (this.db
+          .query(
+            `SELECT * FROM plugin_tool_policies
+             ORDER BY plugin_id ASC, tool_name COLLATE NOCASE ASC`,
+          )
+          .all() as Row[]);
+    return rows.map((row) => ({
+      pluginId: asString(row.plugin_id),
+      toolName: asString(row.tool_name),
+      policy: asString(row.policy, "ask") as PluginToolPolicyRecord["policy"],
     }));
   }
 

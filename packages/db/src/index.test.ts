@@ -859,3 +859,101 @@ describe("discuss persistence", () => {
     }
   });
 });
+
+describe("plugin persistence", () => {
+  test("migrates a v3 database to plugin tables with a backup", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "finalbot-db-plugin-migration-"));
+    tempDirs.push(dir);
+    const path = join(dir, "v3.sqlite");
+    const legacy = new Database(path, { create: true, readwrite: true });
+    legacy.exec(`
+      CREATE TABLE legacy_marker (id TEXT PRIMARY KEY);
+      PRAGMA user_version = 3;
+    `);
+    legacy.close();
+
+    const db = new FinalBotDatabase(path);
+    try {
+      expect(db.db.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+      expect(
+        db.db
+          .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get("plugins"),
+      ).not.toBeNull();
+      expect(
+        db.db
+          .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get("plugin_tool_policies"),
+      ).not.toBeNull();
+      expect(
+        (await readdir(dir)).some((name) => name.includes(".v3.") && name.endsWith(".bak")),
+      ).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("tracks discovery, enablement, status, and tool policies", async () => {
+    const db = await createDatabase();
+    try {
+      const discovered = db.upsertDiscoveredPlugin({
+        id: "demo",
+        name: "Demo",
+        version: "1.0.0",
+        description: "Demo plugin",
+        author: "FinalBot",
+        entryPath: "D:/data/plugins/demo/index.js",
+        manifest: {
+          apiVersion: 1,
+          permissions: ["tools"],
+          tools: ["echo"],
+        },
+      });
+      expect(discovered).toMatchObject({
+        id: "demo",
+        enabled: false,
+        status: "disabled",
+        lastError: null,
+      });
+
+      const enabled = db.setPluginEnabled("demo", true);
+      expect(enabled).toMatchObject({ enabled: true, status: "loading" });
+      db.updatePluginStatus("demo", "active");
+      db.setPluginToolPolicy("demo", "echo", "auto");
+
+      expect(db.getPlugin("demo")).toMatchObject({
+        enabled: true,
+        status: "active",
+        lastError: null,
+      });
+      expect(db.getPluginToolPolicy("demo", "echo")).toBe("auto");
+      expect(db.listPluginToolPolicies("demo")).toEqual([
+        { pluginId: "demo", toolName: "echo", policy: "auto" },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("preserves invalid manifest errors during discovery", async () => {
+    const db = await createDatabase();
+    try {
+      const record = db.upsertDiscoveredPlugin({
+        id: "broken",
+        name: "broken",
+        version: "unknown",
+        description: "Broken plugin",
+        entryPath: "D:/data/plugins/broken/metadata.json",
+        manifest: {},
+        error: "apiVersion is required",
+      });
+      expect(record).toMatchObject({
+        enabled: false,
+        status: "error",
+        lastError: "apiVersion is required",
+      });
+    } finally {
+      db.close();
+    }
+  });
+});

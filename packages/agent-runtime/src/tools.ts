@@ -34,6 +34,7 @@ export class ToolRegistry {
   private readonly snapshots = new Map<string, ToolSnapshot>();
   private readonly sessionApproved = new Set<string>();
   private mcpTools: ToolDefinition[] = [];
+  private pluginTools: ToolDefinition[] = [];
 
   constructor(private readonly options: ToolRegistryOptions) {
     this.rebuild();
@@ -54,6 +55,11 @@ export class ToolRegistry {
 
   replaceMcpTools(tools: ToolDefinition[]): ToolSnapshot {
     this.mcpTools = tools;
+    return this.rebuild();
+  }
+
+  replacePluginTools(tools: ToolDefinition[]): ToolSnapshot {
+    this.pluginTools = tools;
     return this.rebuild();
   }
 
@@ -112,7 +118,12 @@ export class ToolRegistry {
           try {
             decision = await approve({
               requestId: record.id,
-              kind: "mcp",
+              kind:
+                tool.namespace === "mcp"
+                  ? "mcp"
+                  : tool.namespace.startsWith("plugin.")
+                    ? "plugin"
+                    : "tool",
               title: `允许调用 ${tool.namespace}/${tool.name}`,
               detail: stringifyApprovalArguments(input.arguments),
               canAcceptForSession: true,
@@ -173,6 +184,7 @@ export class ToolRegistry {
             invoke: (input, context) => this.call(input, context),
           })
         : []),
+      ...this.pluginTools,
       ...this.mcpTools,
     ];
     this.snapshot = {

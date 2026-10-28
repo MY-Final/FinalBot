@@ -126,7 +126,7 @@ export type AgentEvent =
 export interface PendingApproval {
   requestId: string;
   runId: string;
-  kind: "command" | "file_change" | "user_input" | "permissions" | "mcp";
+  kind: "command" | "file_change" | "user_input" | "permissions" | "tool" | "mcp" | "plugin";
   title: string;
   detail: string;
   canAcceptForSession: boolean;

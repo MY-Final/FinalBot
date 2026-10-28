@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryService, ScratchpadService, ToolRegistry } from "@finalbot/agent-runtime";
 import { ChannelRegistry } from "@finalbot/core";
 import { FinalBotDatabase } from "@finalbot/db";
+import { PluginManager } from "@finalbot/plugin-sdk";
 import { loadConfig } from "./config";
 import { EventBus } from "./event-bus";
 import { assertAdminBinding, createApp } from "./index";
@@ -249,6 +250,125 @@ describe("HTTP API", () => {
     }
   });
 
+  test("discovers, enables, configures, and disables plugin tools", async () => {
+    const env = await setup();
+    try {
+      const pluginDirectory = join(env.pluginDir, "demo");
+      await mkdir(pluginDirectory, { recursive: true });
+      await writeFile(
+        join(pluginDirectory, "metadata.json"),
+        JSON.stringify({
+          apiVersion: 1,
+          id: "demo",
+          name: "Demo Plugin",
+          version: "1.2.3",
+          description: "Plugin API test",
+          entry: "index.js",
+          permissions: ["tools"],
+          tools: ["hello"],
+        }),
+      );
+      await writeFile(
+        join(pluginDirectory, "index.js"),
+        `
+export default {
+  activate(context) {
+    context.registerTool({
+      name: "hello",
+      description: "Say hello",
+      inputSchema: {
+        type: "object",
+        properties: { name: { type: "string" } },
+        required: ["name"]
+      },
+      run(input) {
+        return { message: "hello " + input.name };
+      }
+    });
+  }
+};
+`,
+      );
+
+      const reloaded = await env.app.request("/api/plugins/reload", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin" },
+      });
+      expect(reloaded.status).toBe(200);
+      expect(await reloaded.json()).toMatchObject({
+        plugins: [
+          {
+            id: "demo",
+            enabled: false,
+            status: "disabled",
+          },
+        ],
+      });
+
+      const enabled = await env.app.request("/api/plugins/demo/enable", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin" },
+      });
+      expect(enabled.status).toBe(200);
+      expect(await enabled.json()).toMatchObject({
+        plugins: [
+          {
+            id: "demo",
+            enabled: true,
+            status: "active",
+            tools: [expect.objectContaining({ name: "hello", policy: "ask" })],
+          },
+        ],
+      });
+
+      const tools = await env.app.request("/api/tools", {
+        headers: { Authorization: "Bearer test-admin" },
+      });
+      const snapshot = (await tools.json()) as {
+        tools: Array<{ namespace: string; name: string; policy: string }>;
+      };
+      expect(snapshot.tools).toContainEqual(
+        expect.objectContaining({
+          namespace: "plugin.demo",
+          name: "hello",
+          policy: "ask",
+        }),
+      );
+
+      const policy = await env.app.request("/api/plugins/demo/policy", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-admin",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ toolName: "hello", policy: "auto" }),
+      });
+      expect(policy.status).toBe(200);
+      expect(await policy.json()).toMatchObject({
+        plugins: [
+          {
+            id: "demo",
+            tools: [expect.objectContaining({ name: "hello", policy: "auto" })],
+          },
+        ],
+      });
+
+      const disabled = await env.app.request("/api/plugins/demo/disable", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin" },
+      });
+      expect(disabled.status).toBe(200);
+      const pluginList = await env.app.request("/api/plugins", {
+        headers: { Authorization: "Bearer test-admin" },
+      });
+      expect(await pluginList.json()).toMatchObject([
+        { id: "demo", enabled: false, status: "disabled", tools: [] },
+      ]);
+    } finally {
+      await env.close();
+    }
+  });
+
   test("requires an admin token for non-loopback listeners", () => {
     expect(() => assertAdminBinding("127.0.0.1", null)).not.toThrow();
     expect(() => assertAdminBinding("::1", null)).not.toThrow();
@@ -273,13 +393,38 @@ async function setup() {
     memory: new MemoryService(db),
     scratchpad: new ScratchpadService(db),
   });
+  const pluginDir = join(dir, "plugins");
+  const plugins = new PluginManager({
+    db,
+    pluginDir,
+    pluginDataDir: join(dir, "plugin-data"),
+    activationTimeoutMs: 2_000,
+    toolTimeoutMs: 2_000,
+    eventTimeoutMs: 2_000,
+    onToolsChanged: (pluginTools) => tools.replacePluginTools(pluginTools),
+  });
+  await plugins.reload();
   const channels = new ChannelRegistry();
   channels.register(new WebChannelAdapter(), () => undefined);
-  const app = createApp(db, bus, runs, () => channels.states(), null, "test-admin", owner, tools);
+  const app = createApp(
+    db,
+    bus,
+    runs,
+    () => channels.states(),
+    null,
+    "test-admin",
+    owner,
+    tools,
+    Date.now(),
+    null,
+    plugins,
+  );
   return {
     app,
     db,
+    pluginDir,
     async close() {
+      await plugins.close();
       await runs.close();
       db.close();
     },

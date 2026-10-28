@@ -7,6 +7,7 @@ import type {
   HealthResponse,
   McpServerSummary,
   MemorySummary,
+  PluginSummary,
   RunDetail,
   RunSummary,
   ScheduleSummary,
@@ -52,6 +53,11 @@ export interface ToolSnapshotResponse {
   revision: number;
   hash: string;
   tools: ToolSummary[];
+}
+
+export interface PluginMutationResponse {
+  plugins: PluginSummary[];
+  snapshot: Pick<ToolSnapshotResponse, "revision" | "hash"> | null;
 }
 
 export interface CreateScheduleInput {
@@ -237,6 +243,29 @@ export const api = {
   deleteMcpServer: (serverId: string) =>
     request<void>(`/api/mcp/servers/${encodeURIComponent(serverId)}`, {
       method: "DELETE",
+    }),
+  plugins: () => request<PluginSummary[]>("/api/plugins"),
+  reloadPlugins: () =>
+    request<PluginMutationResponse>("/api/plugins/reload", {
+      method: "POST",
+    }),
+  enablePlugin: (id: string) =>
+    request<PluginMutationResponse>(`/api/plugins/${encodeURIComponent(id)}/enable`, {
+      method: "POST",
+    }),
+  disablePlugin: (id: string) =>
+    request<PluginMutationResponse>(`/api/plugins/${encodeURIComponent(id)}/disable`, {
+      method: "POST",
+    }),
+  reloadPlugin: (id: string) =>
+    request<PluginMutationResponse>(`/api/plugins/${encodeURIComponent(id)}/reload`, {
+      method: "POST",
+    }),
+  updatePluginPolicy: (id: string, toolName: string, policy: "auto" | "ask" | "deny") =>
+    request<PluginMutationResponse>(`/api/plugins/${encodeURIComponent(id)}/policy`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ toolName, policy }),
     }),
   discussDecisions: (conversationId?: string) =>
     request<DiscussDecisionSummary[]>(

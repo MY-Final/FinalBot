@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   DiscussService,
   MemoryService,
@@ -18,6 +19,7 @@ import {
 } from "@finalbot/core";
 import { FinalBotDatabase, type McpServerRecord } from "@finalbot/db";
 import { McpManager } from "@finalbot/mcp-client";
+import { PluginManager } from "@finalbot/plugin-sdk";
 import type { HealthResponse, ServerEvent } from "@finalbot/protocol";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
@@ -41,6 +43,7 @@ export function createApp(
   tools: ToolRegistry | null = null,
   startedAt = Date.now(),
   mcp: McpManager | null = null,
+  plugins: PluginManager | null = null,
 ): Hono {
   const app = new Hono();
   const memoryService = new MemoryService(db);
@@ -426,6 +429,77 @@ export function createApp(
     }
   });
 
+  app.get("/api/plugins", (c) => {
+    return c.json(plugins?.list() ?? fallbackPluginSummaries(db));
+  });
+
+  app.post("/api/plugins/reload", async (c) => {
+    if (!plugins) return c.json({ error: "plugins_unavailable" }, 503);
+    try {
+      await plugins.reload();
+      const snapshot = tools?.replacePluginTools(plugins.listTools()) ?? null;
+      return c.json({
+        plugins: plugins.list(),
+        snapshot: snapshot ? { revision: snapshot.revision, hash: snapshot.hash } : null,
+      });
+    } catch (error) {
+      return c.json({ error: "plugins_reload_failed", message: errorMessage(error) }, 502);
+    }
+  });
+
+  app.post("/api/plugins/:id/enable", async (c) => {
+    if (!plugins) return c.json({ error: "plugins_unavailable" }, 503);
+    try {
+      await plugins.enable(c.req.param("id"));
+      const snapshot = tools?.replacePluginTools(plugins.listTools()) ?? null;
+      return c.json({ plugins: plugins.list(), snapshot });
+    } catch (error) {
+      return c.json({ error: "plugin_enable_failed", message: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post("/api/plugins/:id/disable", async (c) => {
+    if (!plugins) return c.json({ error: "plugins_unavailable" }, 503);
+    try {
+      await plugins.disable(c.req.param("id"));
+      const snapshot = tools?.replacePluginTools(plugins.listTools()) ?? null;
+      return c.json({ plugins: plugins.list(), snapshot });
+    } catch (error) {
+      return c.json({ error: "plugin_disable_failed", message: errorMessage(error) }, 400);
+    }
+  });
+
+  app.post("/api/plugins/:id/reload", async (c) => {
+    if (!plugins) return c.json({ error: "plugins_unavailable" }, 503);
+    try {
+      await plugins.reloadPlugin(c.req.param("id"));
+      const snapshot = tools?.replacePluginTools(plugins.listTools()) ?? null;
+      return c.json({ plugins: plugins.list(), snapshot });
+    } catch (error) {
+      return c.json({ error: "plugin_reload_failed", message: errorMessage(error) }, 400);
+    }
+  });
+
+  const pluginPolicyInput = z.object({
+    toolName: z.string().trim().min(1),
+    policy: z.enum(["auto", "ask", "deny"]),
+  });
+
+  app.post("/api/plugins/:id/policy", async (c) => {
+    if (!plugins) return c.json({ error: "plugins_unavailable" }, 503);
+    const parsed = pluginPolicyInput.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: "invalid_request", message: parsed.error.message }, 400);
+    }
+    try {
+      plugins.updateToolPolicy(c.req.param("id"), parsed.data.toolName, parsed.data.policy);
+      const snapshot = tools?.replacePluginTools(plugins.listTools()) ?? null;
+      return c.json({ plugins: plugins.list(), snapshot });
+    } catch (error) {
+      return c.json({ error: "plugin_policy_update_failed", message: errorMessage(error) }, 400);
+    }
+  });
+
   app.get("/api/schedules", (c) => c.json(db.listSchedules()));
 
   const scheduleInput = z.object({
@@ -738,6 +812,20 @@ async function main(): Promise<void> {
         }),
     },
   });
+  const plugins = new PluginManager({
+    db,
+    pluginDir: join(config.dataDir, "plugins"),
+    pluginDataDir: join(config.dataDir, "plugin-data"),
+    onToolsChanged: (pluginTools) => {
+      tools.replacePluginTools(pluginTools);
+    },
+  });
+  bus.subscribe(({ event }) => {
+    const eventType = PluginManager.eventType(event.type);
+    if (eventType) void plugins.dispatchEvent(eventType, event);
+  });
+  await plugins.reload();
+  tools.replacePluginTools(plugins.listTools());
   const mcp = new McpManager({ db });
   const mcpTools = await mcp.reload();
   tools.replaceMcpTools(mcpTools);
@@ -866,6 +954,7 @@ async function main(): Promise<void> {
     tools,
     startedAt,
     mcp,
+    plugins,
   );
   const server = Bun.serve({
     hostname: config.host,
@@ -886,6 +975,7 @@ async function main(): Promise<void> {
     discuss.stop();
     scheduler.stop();
     clearInterval(cleanupTimer);
+    await plugins.close();
     await mcp.close();
     await channels.stop();
     await runs.close();
@@ -982,6 +1072,24 @@ function mcpServerSummary(
         })) ?? [],
     policies,
   };
+}
+
+function fallbackPluginSummaries(db: FinalBotDatabase) {
+  return db.listPlugins().map((plugin) => ({
+    id: plugin.id,
+    name: plugin.name,
+    version: plugin.version,
+    description: plugin.description,
+    author: plugin.author,
+    source: plugin.source,
+    enabled: plugin.enabled,
+    status: plugin.status,
+    lastError: plugin.lastError,
+    createdAt: plugin.createdAt,
+    updatedAt: plugin.updatedAt,
+    tools: [],
+    events: [],
+  }));
 }
 
 function parseStringArray(value: string): string[] {

@@ -16,6 +16,7 @@
     "@finalbot/core": "workspace:*",
     "@finalbot/db": "workspace:*",
     "@finalbot/mcp-client": "workspace:*",
+    "@finalbot/plugin-sdk": "workspace:*",
     "@finalbot/protocol": "workspace:*",
     "@finalbot/workspace-git": "workspace:*",
     "hono": "^4.10.7",

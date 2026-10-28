@@ -11,11 +11,12 @@ import { ApiRequestError, api, getAdminToken, setAdminToken, subscribeEvents } f
 import { BotsPage } from "./BotsPage";
 import { ChannelsPage } from "./ChannelsPage";
 import { MemoryPage } from "./MemoryPage";
+import { PluginsPage } from "./PluginsPage";
 import { RunsPage } from "./RunsPage";
 import { SchedulesPage } from "./SchedulesPage";
 import { ToolsPage } from "./ToolsPage";
 
-type PageId = "runs" | "channels" | "bots" | "memory" | "tools" | "schedules";
+type PageId = "runs" | "channels" | "bots" | "memory" | "tools" | "plugins" | "schedules";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
@@ -30,7 +31,8 @@ const NAV_ITEMS: Array<{
   { id: "bots", label: "Bots", index: "03", description: "Agent roster" },
   { id: "memory", label: "记忆", index: "04", description: "Owner / Bot layers" },
   { id: "tools", label: "工具", index: "05", description: "Tool snapshots" },
-  { id: "schedules", label: "定时", index: "06", description: "Durable cron" },
+  { id: "plugins", label: "插件", index: "06", description: "Worker extensions" },
+  { id: "schedules", label: "定时", index: "07", description: "Durable cron" },
 ];
 
 export function App() {
@@ -341,6 +343,7 @@ export function App() {
         {page === "bots" && <BotsPage bots={bots} runs={runs} />}
         {page === "memory" && <MemoryPage bots={bots} onError={setError} />}
         {page === "tools" && <ToolsPage onError={setError} />}
+        {page === "plugins" && <PluginsPage onError={setError} />}
         {page === "schedules" && (
           <SchedulesPage bots={bots} channels={channels} runs={runs} onError={setError} />
         )}

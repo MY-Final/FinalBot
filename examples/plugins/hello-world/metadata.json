@@ -1,0 +1,11 @@
+{
+  "apiVersion": 1,
+  "id": "hello-world",
+  "name": "Hello World",
+  "version": "1.0.0",
+  "description": "Minimal FinalBot tool and event example.",
+  "author": "FinalBot",
+  "entry": "index.js",
+  "permissions": ["tools", "events"],
+  "tools": ["greet"]
+}

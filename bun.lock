@@ -30,6 +30,7 @@
         "@finalbot/core": "workspace:*",
         "@finalbot/db": "workspace:*",
         "@finalbot/mcp-client": "workspace:*",
+        "@finalbot/plugin-sdk": "workspace:*",
         "@finalbot/protocol": "workspace:*",
         "@finalbot/workspace-git": "workspace:*",
         "hono": "^4.10.7",
@@ -104,6 +105,14 @@
     },
     "packages/mcp-client": {
       "name": "@finalbot/mcp-client",
+      "version": "0.1.0",
+      "dependencies": {
+        "@finalbot/core": "workspace:*",
+        "@finalbot/db": "workspace:*",
+      },
+    },
+    "packages/plugin-sdk": {
+      "name": "@finalbot/plugin-sdk",
       "version": "0.1.0",
       "dependencies": {
         "@finalbot/core": "workspace:*",
@@ -252,6 +261,8 @@
     "@finalbot/desktop": ["@finalbot/desktop@workspace:apps/desktop"],
 
     "@finalbot/mcp-client": ["@finalbot/mcp-client@workspace:packages/mcp-client"],
+
+    "@finalbot/plugin-sdk": ["@finalbot/plugin-sdk@workspace:packages/plugin-sdk"],
 
     "@finalbot/protocol": ["@finalbot/protocol@workspace:packages/protocol"],
 

@@ -206,6 +206,28 @@ export interface McpServerSummary {
   }>;
 }
 
+export interface PluginToolSummary {
+  name: string;
+  description: string;
+  policy: "auto" | "ask" | "deny";
+}
+
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string | null;
+  source: string;
+  enabled: boolean;
+  status: "disabled" | "loading" | "active" | "error" | "missing";
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  tools: PluginToolSummary[];
+  events: string[];
+}
+
 export interface ToolCallSummary {
   id: string;
   runId: string;
