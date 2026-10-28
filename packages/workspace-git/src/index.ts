@@ -64,4 +64,3 @@ export class GitWorkspaceManager {
     return [status, diff].filter(Boolean).join("\n\n");
   }
 }
-

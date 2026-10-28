@@ -1,4 +1,11 @@
-import type { InboundMessage } from "@finalbot/core";
+import type {
+  ChannelAdapter,
+  ChannelState,
+  InboundEnvelope,
+  OutboundAddress,
+  OutboundMessage,
+  SendResult,
+} from "@finalbot/core";
 import { z } from "zod";
 
 const segmentSchema = z
@@ -39,7 +46,7 @@ export interface OneBotConnectionState {
   accountId: string | null;
 }
 
-type MessageHandler = (message: InboundMessage) => void | Promise<void>;
+type MessageHandler = (message: InboundEnvelope) => void | Promise<void>;
 type StateHandler = (state: OneBotConnectionState) => void;
 
 export interface OneBotActionResponse {
@@ -55,7 +62,8 @@ interface PendingAction {
   timer: ReturnType<typeof setTimeout>;
 }
 
-export class OneBotAdapter {
+export class OneBotAdapter implements ChannelAdapter {
+  readonly id = "onebot";
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs = 1000;
@@ -76,27 +84,46 @@ export class OneBotAdapter {
     };
   }
 
-  getState(): OneBotConnectionState {
+  getConnectionState(): OneBotConnectionState {
     return { ...this.state };
   }
 
-  start(): void {
+  getState(): ChannelState {
+    return {
+      id: this.id,
+      type: "onebot",
+      enabled: this.config.wsUrl.length > 0,
+      configured: this.config.wsUrl.length > 0,
+      connected: this.state.connected,
+      accountId: this.state.accountId,
+      capabilities: {
+        observeAll: true,
+        proactiveSend: true,
+        reply: false,
+        markdown: false,
+        maxTextLength: 4000,
+      },
+      lastError: null,
+    };
+  }
+
+  async start(): Promise<void> {
     if (!this.config.wsUrl) {
-      this.onState(this.getState());
+      this.onState(this.getConnectionState());
       return;
     }
     this.stopped = false;
     this.connect();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.socket?.close();
     this.socket = null;
     this.state = { ...this.state, connected: false };
-    this.onState(this.getState());
+    this.onState(this.getConnectionState());
   }
 
   private connect(): void {
@@ -112,14 +139,14 @@ export class OneBotAdapter {
     socket.addEventListener("open", () => {
       this.reconnectDelayMs = 1000;
       this.state = { ...this.state, connected: true };
-      this.onState(this.getState());
+      this.onState(this.getConnectionState());
     });
     socket.addEventListener("message", (event) => {
       void this.handleMessage(event.data);
     });
     socket.addEventListener("close", () => {
       this.state = { ...this.state, connected: false };
-      this.onState(this.getState());
+      this.onState(this.getConnectionState());
       if (!this.stopped) this.scheduleReconnect();
     });
     socket.addEventListener("error", () => {
@@ -186,7 +213,7 @@ export class OneBotAdapter {
     pending.resolve(response);
   }
 
-  private toInbound(event: OneBotEvent): InboundMessage | null {
+  private toInbound(event: OneBotEvent): InboundEnvelope | null {
     if (event.post_type !== "message" || !event.message_type) return null;
     if (event.self_id !== undefined) {
       this.state = {
@@ -204,13 +231,6 @@ export class OneBotAdapter {
     ) {
       return null;
     }
-    if (
-      event.message_type === "group" &&
-      (this.config.requireGroupMention ?? true) &&
-      !isGroupMention(event, accountId)
-    ) {
-      return null;
-    }
     const text = extractText(event.message, event.raw_message);
     if (!text.trim()) return null;
 
@@ -221,27 +241,27 @@ export class OneBotAdapter {
         : `private:${senderId}`;
 
     return {
-      channel: "onebot",
+      channelId: this.id,
       accountId,
       externalConversationId,
       conversationKind: event.message_type,
       externalMessageId: messageId,
       senderId,
+      ...(event.sender?.nickname ? { senderName: event.sender.nickname } : {}),
       text,
+      mentions: extractMentions(event.message),
+      botMentioned: isGroupMention(event, accountId),
+      botRepliedTo: false,
       raw: event,
       receivedAt: new Date().toISOString(),
-      replyTarget:
-        event.message_type === "group"
-          ? {
-              kind: "onebot",
-              messageType: "group",
-              groupId: String(event.group_id ?? "unknown"),
-            }
-          : {
-              kind: "onebot",
-              messageType: "private",
-              userId: senderId,
-            },
+      replyAddress: {
+        channelId: this.id,
+        accountId,
+        data:
+          event.message_type === "group"
+            ? { messageType: "group", groupId: String(event.group_id ?? "unknown") }
+            : { messageType: "private", userId: senderId },
+      },
     };
   }
 
@@ -251,6 +271,22 @@ export class OneBotAdapter {
 
   async sendGroup(groupId: string, text: string): Promise<void> {
     await this.callAction("send_group_msg", { group_id: groupId, message: text });
+  }
+
+  async send(address: OutboundAddress, message: OutboundMessage): Promise<SendResult> {
+    const messageType = address.data.messageType;
+    if (messageType === "group") {
+      const groupId = address.data.groupId;
+      if (typeof groupId !== "string") throw new Error("OneBot groupId is required");
+      await this.sendGroup(groupId, message.text);
+    } else if (messageType === "private") {
+      const userId = address.data.userId;
+      if (typeof userId !== "string") throw new Error("OneBot userId is required");
+      await this.sendPrivate(userId, message.text);
+    } else {
+      throw new Error("Unsupported OneBot outbound address");
+    }
+    return { deliveredAt: new Date().toISOString() };
   }
 
   async callAction(action: string, params: Record<string, unknown>): Promise<unknown> {
@@ -296,6 +332,15 @@ export function extractText(
     }
   }
   return parts.join("");
+}
+
+export function extractMentions(
+  message: string | Array<{ type: string; data?: Record<string, unknown> | undefined }> | undefined,
+): Array<{ id: string }> {
+  if (!Array.isArray(message)) return [];
+  return message
+    .filter((segment) => segment.type === "at" && segment.data?.qq !== undefined)
+    .map((segment) => ({ id: String(segment.data?.qq) }));
 }
 
 export function isSelfAuthoredEvent(event: {

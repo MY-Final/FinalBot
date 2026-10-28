@@ -72,15 +72,6 @@ export interface CodexTurnStartResult {
   };
 }
 
-export type CodexCommandApprovalDecision =
-  | "accept"
-  | "acceptForSession"
-  | "decline"
-  | "cancel";
+export type CodexCommandApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel";
 
-export type CodexFileChangeApprovalDecision =
-  | "accept"
-  | "acceptForSession"
-  | "decline"
-  | "cancel";
-
+export type CodexFileChangeApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel";

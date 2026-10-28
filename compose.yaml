@@ -5,10 +5,16 @@ services:
     ports:
       - "8787:8787"
     environment:
+      FINALBOT_ADMIN_TOKEN: ${FINALBOT_ADMIN_TOKEN:?set FINALBOT_ADMIN_TOKEN for non-loopback Docker access}
       FINALBOT_REPO_PATH: /workspaces/project
       NAPCAT_WS_URL: ${NAPCAT_WS_URL:-}
       NAPCAT_ACCESS_TOKEN: ${NAPCAT_ACCESS_TOKEN:-}
       NAPCAT_ACCOUNT_ID: ${NAPCAT_ACCOUNT_ID:-}
+      NAPCAT_PRIVATE_USER_IDS: ${NAPCAT_PRIVATE_USER_IDS:-}
+      NAPCAT_IGNORED_USER_IDS: ${NAPCAT_IGNORED_USER_IDS:-}
+      FINALBOT_QQ_ENABLED: ${FINALBOT_QQ_ENABLED:-0}
+      FINALBOT_QQ_APP_ID: ${FINALBOT_QQ_APP_ID:-}
+      FINALBOT_QQ_APP_SECRET: ${FINALBOT_QQ_APP_SECRET:-}
       FINALBOT_CODEX_BIN: codex
     volumes:
       - finalbot-data:/data

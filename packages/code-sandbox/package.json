@@ -1,0 +1,14 @@
+{
+  "name": "@finalbot/code-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@finalbot/core": "workspace:*",
+    "@jitl/quickjs-wasmfile-release-sync": "0.31.0",
+    "quickjs-emscripten-core": "0.31.0"
+  }
+}

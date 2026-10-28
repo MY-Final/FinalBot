@@ -5,4 +5,3 @@ export function createId(prefix: string): string {
 export function nowIso(): string {
   return new Date().toISOString();
 }
-

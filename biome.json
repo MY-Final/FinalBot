@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.3.10/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.3/schema.json",
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
@@ -9,7 +9,13 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
+      "complexity": {
+        "noImportantStyles": "off"
+      },
+      "style": {
+        "noDescendingSpecificity": "off"
+      },
       "suspicious": {
         "noExplicitAny": "error"
       }
@@ -23,7 +29,14 @@
     }
   },
   "files": {
-    "includes": ["**", "!node_modules", "!dist", "!.tmp", "!apps/web/dist"]
+    "includes": [
+      "**",
+      "!node_modules",
+      "!dist",
+      "!.tmp",
+      "!data",
+      "!apps/web/dist",
+      "!apps/desktop/release"
+    ]
   }
 }
-

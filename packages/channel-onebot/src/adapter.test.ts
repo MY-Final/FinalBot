@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { InboundMessage } from "@finalbot/core";
+import type { InboundEnvelope } from "@finalbot/core";
 import { OneBotAdapter, type OneBotConnectionState } from "./index";
 
 const servers: ReturnType<typeof Bun.serve>[] = [];
@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("OneBot WebSocket adapter", () => {
   test("receives binary message events and correlates action responses", async () => {
-    const received: InboundMessage[] = [];
+    const received: InboundEnvelope[] = [];
     const actions: Array<{ action: string; params: Record<string, unknown> }> = [];
     const states: OneBotConnectionState[] = [];
     const server = startServer((socket, raw) => {
@@ -54,7 +54,7 @@ describe("OneBot WebSocket adapter", () => {
     server.publish("test-messages", new TextEncoder().encode(event));
 
     const message = await waitFor(() => received[0] ?? null);
-    expect(message.channel).toBe("onebot");
+    expect(message.channelId).toBe("onebot");
     expect(message.externalConversationId).toBe("private:10001");
     expect(message.senderId).toBe("10001");
     expect(message.text).toBe("/help");

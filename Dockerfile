@@ -5,8 +5,7 @@ COPY package.json bun.lock tsconfig.json tsconfig.base.json ./
 COPY apps ./apps
 COPY packages ./packages
 RUN bun install --frozen-lockfile
-RUN bun run build:web
-RUN bun build apps/server/src/index.ts --compile --outfile /app/dist/finalbot
+RUN bun run build
 
 FROM debian:bookworm-slim AS runtime
 ARG CODEX_VERSION=0.164.0

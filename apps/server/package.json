@@ -9,13 +9,16 @@
   },
   "dependencies": {
     "@finalbot/agent-codex": "workspace:*",
+    "@finalbot/agent-runtime": "workspace:*",
     "@finalbot/channel-onebot": "workspace:*",
+    "@finalbot/channel-qq": "workspace:*",
+    "@finalbot/code-sandbox": "workspace:*",
     "@finalbot/core": "workspace:*",
     "@finalbot/db": "workspace:*",
+    "@finalbot/mcp-client": "workspace:*",
     "@finalbot/protocol": "workspace:*",
     "@finalbot/workspace-git": "workspace:*",
     "hono": "^4.10.7",
     "zod": "^4.1.12"
   }
 }
-

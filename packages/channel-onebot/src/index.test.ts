@@ -36,7 +36,7 @@ describe("OneBot self-message filtering", () => {
   test("does not discard messages from other group members", () => {
     expect(
       isSelfAuthoredEvent({
-      self_id: 3430269738,
+        self_id: 3430269738,
         user_id: 479284441,
       }),
     ).toBe(false);
@@ -93,4 +93,3 @@ describe("OneBot private routing", () => {
     expect(isIgnoredUser("10001", ["3430269738"])).toBe(false);
   });
 });
-

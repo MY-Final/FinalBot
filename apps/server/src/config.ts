@@ -7,6 +7,7 @@ const envSchema = z.object({
   FINALBOT_DATA_DIR: z.string().default("./data"),
   FINALBOT_LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   FINALBOT_REPO_PATH: z.string().default(""),
+  FINALBOT_ADMIN_TOKEN: z.string().default(""),
   NAPCAT_WS_URL: z.string().default(""),
   NAPCAT_ACCESS_TOKEN: z.string().default(""),
   NAPCAT_ACCOUNT_ID: z.string().default(""),
@@ -22,6 +23,15 @@ const envSchema = z.object({
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("workspace-write"),
   FINALBOT_MAX_CONCURRENT_RUNS: z.coerce.number().int().min(1).max(32).default(2),
+  FINALBOT_QQ_ENABLED: z
+    .enum(["0", "1"])
+    .default("0")
+    .transform((value) => value === "1"),
+  FINALBOT_QQ_APP_ID: z.string().default(""),
+  FINALBOT_QQ_APP_SECRET: z.string().default(""),
+  FINALBOT_QQ_TOKEN_URL: z.string().default(""),
+  FINALBOT_QQ_API_BASE_URL: z.string().default(""),
+  FINALBOT_QQ_GATEWAY_URL: z.string().default(""),
   FINALBOT_FAKE_AGENT: z
     .enum(["0", "1"])
     .default("0")
@@ -36,6 +46,7 @@ export interface AppConfig {
   worktreesDir: string;
   logLevel: "debug" | "info" | "warn" | "error";
   repositoryPath: string | null;
+  adminToken: string | null;
   onebot: {
     wsUrl: string;
     accessToken: string;
@@ -48,6 +59,14 @@ export interface AppConfig {
     executable: string;
     model: string | null;
     sandbox: "read-only" | "workspace-write" | "danger-full-access";
+  };
+  qq: {
+    enabled: boolean;
+    appId: string;
+    appSecret: string;
+    tokenUrl: string | null;
+    apiBaseUrl: string | null;
+    gatewayUrl: string | null;
   };
   fakeAgent: boolean;
   maxConcurrentRuns: number;
@@ -64,6 +83,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     worktreesDir: resolve(dataDir, "worktrees"),
     logLevel: parsed.FINALBOT_LOG_LEVEL,
     repositoryPath: parsed.FINALBOT_REPO_PATH ? resolve(parsed.FINALBOT_REPO_PATH) : null,
+    adminToken: parsed.FINALBOT_ADMIN_TOKEN || null,
     onebot: {
       wsUrl: parsed.NAPCAT_WS_URL,
       accessToken: parsed.NAPCAT_ACCESS_TOKEN,
@@ -77,6 +97,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       model: parsed.FINALBOT_CODEX_MODEL || null,
       sandbox: parsed.FINALBOT_CODEX_SANDBOX,
     },
+    qq: {
+      enabled: parsed.FINALBOT_QQ_ENABLED,
+      appId: parsed.FINALBOT_QQ_APP_ID,
+      appSecret: parsed.FINALBOT_QQ_APP_SECRET,
+      tokenUrl: parsed.FINALBOT_QQ_TOKEN_URL || null,
+      apiBaseUrl: parsed.FINALBOT_QQ_API_BASE_URL || null,
+      gatewayUrl: parsed.FINALBOT_QQ_GATEWAY_URL || null,
+    },
     fakeAgent: parsed.FINALBOT_FAKE_AGENT,
     maxConcurrentRuns: parsed.FINALBOT_MAX_CONCURRENT_RUNS,
   };
@@ -88,4 +116,3 @@ function parseUserIds(value: string): string[] {
     .map((id) => id.trim())
     .filter((id) => /^\d+$/.test(id));
 }
-

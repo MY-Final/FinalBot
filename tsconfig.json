@@ -4,12 +4,6 @@
     "noEmit": true,
     "types": ["bun", "react", "react-dom"]
   },
-  "include": [
-    "apps/**/*.ts",
-    "apps/**/*.tsx",
-    "packages/**/*.ts",
-    "scripts/**/*.ts"
-  ],
+  "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "dist", ".tmp"]
 }
-

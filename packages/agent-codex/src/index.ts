@@ -7,6 +7,8 @@ import {
   type AgentSink,
   type ApprovalDecision,
   createId,
+  type DynamicToolResult,
+  type DynamicToolSpec,
 } from "@finalbot/core";
 import type {
   CodexCommandApprovalDecision,
@@ -44,6 +46,7 @@ interface ActiveRun {
   resolve: (result: AgentRunResult) => void;
   reject: (error: Error) => void;
   finished: boolean;
+  structuredOutput?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,7 +106,7 @@ export class CodexAppServerClient {
         version: this.config.clientVersion ?? "0.1.0",
       },
       capabilities: {
-        experimentalApi: false,
+        experimentalApi: true,
       },
     });
     this.notify("initialized", {});
@@ -222,7 +225,10 @@ export class CodexAppServerClient {
         turn && isRecord(turn.error) && typeof turn.error.message === "string"
           ? turn.error.message
           : undefined;
+      const structuredOutput = extractStructuredOutput(turn, params);
+      if (structuredOutput !== undefined) run.structuredOutput = structuredOutput;
       this.settleRun(run, status, error);
+      return;
     }
   }
 
@@ -302,7 +308,42 @@ export class CodexAppServerClient {
       return;
     }
 
+    if (method === "item/tool/call") {
+      const result = await this.callDynamicTool(run, params);
+      this.respond(id, result);
+      return;
+    }
+
     this.respond(id, { decision: "cancel" });
+  }
+
+  private async callDynamicTool(
+    run: ActiveRun,
+    params: Record<string, unknown>,
+  ): Promise<DynamicToolResult> {
+    if (!run.sink.callTool) {
+      return dynamicFailure("Dynamic tools are not available for this run");
+    }
+    const threadId = typeof params.threadId === "string" ? params.threadId : "";
+    const turnId = typeof params.turnId === "string" ? params.turnId : "";
+    const callId = typeof params.callId === "string" ? params.callId : "";
+    const tool = typeof params.tool === "string" ? params.tool : "";
+    const namespace = typeof params.namespace === "string" ? params.namespace : null;
+    if (!threadId || !turnId || !callId || !tool) {
+      return dynamicFailure("Invalid dynamic tool call payload");
+    }
+    try {
+      return await run.sink.callTool({
+        threadId,
+        turnId,
+        callId,
+        namespace,
+        tool,
+        arguments: params.arguments,
+      });
+    } catch (error) {
+      return dynamicFailure(errorMessage(error));
+    }
   }
 
   private findRun(threadId: string, turnId: string | null): ActiveRun | undefined {
@@ -338,6 +379,7 @@ export class CodexAppServerClient {
       nativeThreadId: run.nativeThreadId ?? "",
       nativeTurnId: run.nativeTurnId ?? "",
       output: run.output,
+      ...(run.structuredOutput !== undefined ? { structuredOutput: run.structuredOutput } : {}),
       ...(normalized === "failed"
         ? { error: error ?? `Codex turn ended with status ${status}` }
         : {}),
@@ -415,6 +457,7 @@ export class CodexAppServerClient {
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           excludeTurns: true,
+          ...(input.dynamicTools ? { dynamicTools: toCodexDynamicTools(input.dynamicTools) } : {}),
         })) as CodexThreadResumeResult;
         threadId = resumed.thread.id;
       } else {
@@ -427,6 +470,7 @@ export class CodexAppServerClient {
           approvalPolicy: "on-request",
           sandbox: input.sandbox,
           serviceName: "finalbot",
+          ...(input.dynamicTools ? { dynamicTools: toCodexDynamicTools(input.dynamicTools) } : {}),
         })) as CodexThreadStartResult;
         threadId = started.thread.id;
       }
@@ -449,6 +493,7 @@ export class CodexAppServerClient {
               ? { type: "dangerFullAccess" }
               : { type: "workspaceWrite", writableRoots: [input.cwd], networkAccess: false },
         ...(model ? { model } : {}),
+        ...(input.outputSchema ? { outputSchema: input.outputSchema } : {}),
       })) as CodexTurnStartResult;
       active.nativeTurnId = started.turn.id;
       await sink.event({ type: "turn", nativeTurnId: started.turn.id });
@@ -559,6 +604,58 @@ function toCommandDecision(decision: ApprovalDecision): CodexCommandApprovalDeci
 
 function toFileDecision(decision: ApprovalDecision): CodexFileChangeApprovalDecision {
   return toCommandDecision(decision);
+}
+
+function toCodexDynamicTools(tools: DynamicToolSpec[]): Array<
+  | DynamicToolSpec
+  | {
+      type: "namespace";
+      name: string;
+      description: string;
+      tools: DynamicToolSpec[];
+    }
+> {
+  const flat: DynamicToolSpec[] = [];
+  const namespaces = new Map<string, DynamicToolSpec[]>();
+  for (const tool of tools) {
+    const slash = tool.name.indexOf("/");
+    if (slash <= 0 || slash === tool.name.length - 1) {
+      flat.push(tool);
+      continue;
+    }
+    const namespace = tool.name.slice(0, slash);
+    const name = tool.name.slice(slash + 1);
+    const group = namespaces.get(namespace) ?? [];
+    group.push({ ...tool, name });
+    namespaces.set(namespace, group);
+  }
+  return [
+    ...flat,
+    ...[...namespaces.entries()].map(([name, namespaceTools]) => ({
+      type: "namespace" as const,
+      name,
+      description: `${name} tools`,
+      tools: namespaceTools,
+    })),
+  ];
+}
+
+function dynamicFailure(message: string): DynamicToolResult {
+  return {
+    success: false,
+    contentItems: [{ type: "inputText", text: JSON.stringify({ error: message }) }],
+  };
+}
+
+function extractStructuredOutput(
+  turn: Record<string, unknown> | null,
+  params: Record<string, unknown>,
+): unknown {
+  if (turn && "outputSchema" in turn) return turn.outputSchema;
+  if (turn && "structuredOutput" in turn) return turn.structuredOutput;
+  if ("structuredOutput" in params) return params.structuredOutput;
+  if ("outputSchema" in params) return params.outputSchema;
+  return undefined;
 }
 
 function processEnv(): Record<string, string> {

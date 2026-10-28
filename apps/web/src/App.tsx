@@ -1,119 +1,166 @@
 import type {
-  ApprovalSummary,
   BotSummary,
+  ChannelSummary,
   HealthResponse,
   RunDetail,
   RunSummary,
   ServerEvent,
 } from "@finalbot/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, subscribeEvents } from "./api";
+import { ApiRequestError, api, getAdminToken, setAdminToken, subscribeEvents } from "./api";
+import { BotsPage } from "./BotsPage";
+import { ChannelsPage } from "./ChannelsPage";
+import { MemoryPage } from "./MemoryPage";
+import { RunsPage } from "./RunsPage";
+import { SchedulesPage } from "./SchedulesPage";
+import { ToolsPage } from "./ToolsPage";
+
+type PageId = "runs" | "channels" | "bots" | "memory" | "tools" | "schedules";
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
-const STATE_LABEL: Record<string, string> = {
-  admitted: "已接收",
-  running: "执行中",
-  waiting_approval: "等待审批",
-  retrying: "重试中",
-  interrupted: "已中断",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-};
-
-function timeAgo(iso: string): string {
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (seconds < 10) return "刚刚";
-  if (seconds < 60) return `${seconds} 秒前`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return new Date(iso).toLocaleDateString("zh-CN");
-}
-
-function shorten(value: string, max = 72): string {
-  const compact = value.replace(/\s+/g, " ").trim();
-  return compact.length > max ? `${compact.slice(0, max)}...` : compact;
-}
+const NAV_ITEMS: Array<{
+  id: PageId;
+  label: string;
+  index: string;
+  description: string;
+}> = [
+  { id: "runs", label: "运行", index: "01", description: "Dispatch & inspect" },
+  { id: "channels", label: "通道", index: "02", description: "Inbound / outbound" },
+  { id: "bots", label: "Bots", index: "03", description: "Agent roster" },
+  { id: "memory", label: "记忆", index: "04", description: "Owner / Bot layers" },
+  { id: "tools", label: "工具", index: "05", description: "Tool snapshots" },
+  { id: "schedules", label: "定时", index: "06", description: "Durable cron" },
+];
 
 export function App() {
+  const [page, setPage] = useState<PageId>(() => pageFromHash());
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [bots, setBots] = useState<BotSummary[]>([]);
-  const [selectedBotId, setSelectedBotId] = useState("coder");
+  const [channels, setChannels] = useState<ChannelSummary[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunDetail | null>(null);
   const [liveOutput, setLiveOutput] = useState("");
-  const [prompt, setPrompt] = useState("");
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const outputRef = useRef<HTMLPreElement>(null);
+  const [loading, setLoading] = useState(true);
+  const [navOpen, setNavOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [tokenDraft, setTokenDraft] = useState(getAdminToken());
+  const [hasToken, setHasToken] = useState(Boolean(getAdminToken()));
+  const [authInvalid, setAuthInvalid] = useState(false);
+  const selectedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    void api
-      .health()
-      .then(setHealth)
-      .catch((cause: unknown) => setError(String(cause)));
-    void api
-      .runs()
-      .then((items) => {
-        setRuns(items);
-        setSelectedId((current) => current ?? items[0]?.id ?? null);
-      })
-      .catch((cause: unknown) => setError(String(cause)));
-    void api
-      .bots()
-      .then((items) => {
-        setBots(items);
-        setSelectedBotId((current) =>
-          items.some((bot) => bot.id === current) ? current : (items[0]?.id ?? "coder"),
-        );
-      })
-      .catch((cause: unknown) => setError(String(cause)));
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    const onHashChange = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
   }, []);
 
-  const applyEvent = useCallback(
-    (event: ServerEvent): void => {
-      if (event.type === "run.updated") {
-        setRuns((current) => {
-          const index = current.findIndex((run) => run.id === event.run.id);
-          const next = index >= 0 ? [...current] : [event.run, ...current];
-          if (index >= 0) next[index] = event.run;
-          return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        });
-        if (event.run.id === selectedId) {
-          setDetail((current) => (current ? { ...current, ...event.run } : current));
-        }
-        return;
-      }
-      if (event.type === "run.delta" && event.runId === selectedId) {
-        setLiveOutput((current) => `${current}${event.text}`);
-        return;
-      }
-      if (event.type === "approval.requested" || event.type === "approval.resolved") {
-        if (event.approval.runId !== selectedId) return;
-        setDetail((current) => {
-          if (!current) return current;
-          const approvals = current.approvals.filter(
-            (item) => item.requestId !== event.approval.requestId,
-          );
-          approvals.push(event.approval);
-          return { ...current, approvals };
-        });
-        return;
-      }
-      if (event.type === "system" && event.level !== "info") {
-        setError(event.message);
-      }
-    },
-    [selectedId],
-  );
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setAuthOpen(true);
+      setAuthInvalid(Boolean(getAdminToken()));
+      setHasToken(false);
+    };
+    window.addEventListener("finalbot:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("finalbot:unauthorized", onUnauthorized);
+  }, []);
+
+  const refreshChannels = useCallback(async (): Promise<void> => {
+    try {
+      const next = await api.channels();
+      setChannels(next);
+      setHealth((current) => (current ? { ...current, channels: next } : current));
+    } catch (cause) {
+      handleApiError(cause, setError, setAuthOpen);
+    }
+  }, []);
+
+  const bootstrap = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    const results = await Promise.allSettled([
+      api.health(),
+      api.bots(),
+      api.channels(),
+      api.runs(),
+    ]);
+    const [healthResult, botsResult, channelsResult, runsResult] = results;
+    let unauthorized = false;
+    if (healthResult.status === "fulfilled") {
+      setHealth(healthResult.value);
+    } else {
+      unauthorized ||= handleApiError(healthResult.reason, setError, setAuthOpen);
+    }
+    if (botsResult.status === "fulfilled") {
+      setBots(botsResult.value);
+    } else {
+      unauthorized ||= handleApiError(botsResult.reason, setError, setAuthOpen);
+    }
+    if (channelsResult.status === "fulfilled") {
+      setChannels(channelsResult.value);
+    } else {
+      unauthorized ||= handleApiError(channelsResult.reason, setError, setAuthOpen);
+    }
+    if (runsResult.status === "fulfilled") {
+      setRuns(runsResult.value);
+      setSelectedId((current) => current ?? runsResult.value[0]?.id ?? null);
+    } else {
+      unauthorized ||= handleApiError(runsResult.reason, setError, setAuthOpen);
+    }
+    if (unauthorized) setAuthInvalid(Boolean(getAdminToken()));
+    setLoading(false);
+  }, []);
 
   useEffect(() => {
-    return subscribeEvents(applyEvent, setConnected);
+    void bootstrap();
+  }, [bootstrap]);
+
+  const applyEvent = useCallback((event: ServerEvent): void => {
+    if (event.type === "run.updated") {
+      setRuns((current) => {
+        const index = current.findIndex((run) => run.id === event.run.id);
+        const next = index >= 0 ? [...current] : [event.run, ...current];
+        if (index >= 0) next[index] = event.run;
+        return next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      });
+      if (event.run.id === selectedIdRef.current) {
+        setDetail((current) => (current ? { ...current, ...event.run } : current));
+      }
+      return;
+    }
+    if (event.type === "run.delta" && event.runId === selectedIdRef.current) {
+      setLiveOutput((current) => `${current}${event.text}`);
+      return;
+    }
+    if (event.type === "approval.requested" || event.type === "approval.resolved") {
+      if (event.approval.runId !== selectedIdRef.current) return;
+      setDetail((current) => {
+        if (!current) return current;
+        const approvals = current.approvals.filter(
+          (item) => item.requestId !== event.approval.requestId,
+        );
+        approvals.push(event.approval);
+        return { ...current, approvals };
+      });
+      return;
+    }
+    if (event.type === "system" && event.level !== "info") {
+      setError(event.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    return subscribeEvents(applyEvent, setConnected, () => {
+      setAuthOpen(true);
+      setAuthInvalid(Boolean(getAdminToken()));
+    });
   }, [applyEvent]);
 
   useEffect(() => {
@@ -131,371 +178,268 @@ export function App() {
         setLiveOutput(next.output);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(String(cause));
+        if (!cancelled) handleApiError(cause, setError, setAuthOpen);
       });
     return () => {
       cancelled = true;
     };
   }, [selectedId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: liveOutput intentionally triggers scrolling.
-  useEffect(() => {
-    if (outputRef.current) {
-      outputRef.current.scrollTop = outputRef.current.scrollHeight;
-    }
-  }, [liveOutput]);
+  const activeCount = useMemo(() => runs.filter((run) => !TERMINAL.has(run.state)).length, [runs]);
+  const connectedChannels = channels.filter((channel) => channel.connected).length;
 
-  const pendingApprovals = useMemo(
-    () => detail?.approvals.filter((approval) => approval.status === "pending") ?? [],
-    [detail],
-  );
-  const selected = runs.find((run) => run.id === selectedId) ?? detail ?? null;
-  const activeCount = runs.filter((run) => !TERMINAL.has(run.state)).length;
+  function navigate(next: PageId): void {
+    setPage(next);
+    setNavOpen(false);
+    window.history.replaceState(null, "", `#/${next}`);
+  }
 
-  async function submit(): Promise<void> {
-    const value = prompt.trim();
-    if (!value || submitting) return;
-    setSubmitting(true);
+  async function createRun(prompt: string, botId: string): Promise<void> {
     setError(null);
     try {
-      const run = await api.createRun(value, selectedBotId);
+      const run = await api.createRun(prompt, botId);
       setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
       setSelectedId(run.id);
-      setPrompt("");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setSubmitting(false);
+      handleApiError(cause, setError, setAuthOpen);
+      throw cause;
     }
   }
 
-  async function interrupt(): Promise<void> {
-    if (!selectedId) return;
+  async function interrupt(id: string): Promise<void> {
     try {
-      await api.interrupt(selectedId);
+      await api.interrupt(id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      handleApiError(cause, setError, setAuthOpen);
     }
   }
 
-  async function resolveApproval(requestId: string, action: string): Promise<void> {
+  async function resolveApproval(id: string, action: string): Promise<void> {
     try {
-      await api.resolveApproval(requestId, action);
+      await api.resolveApproval(id, action);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      handleApiError(cause, setError, setAuthOpen);
     }
+  }
+
+  function saveToken(): void {
+    setAdminToken(tokenDraft);
+    setHasToken(Boolean(tokenDraft.trim()));
+    setAuthInvalid(false);
+    setAuthOpen(false);
+    void bootstrap();
+  }
+
+  function clearToken(): void {
+    setAdminToken("");
+    setTokenDraft("");
+    setHasToken(false);
+    setAuthInvalid(false);
+    setAuthOpen(false);
+    void bootstrap();
   }
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="wordmark" href="/" aria-label="FinalBot">
+        <button
+          type="button"
+          className="wordmark"
+          onClick={() => navigate("runs")}
+          aria-label="FinalBot 首页"
+        >
           <span className="wordmark-mark">F</span>
           <span>
             FINAL<span>BOT</span>
           </span>
-        </a>
+        </button>
+
         <div className="topbar-center">
           <span className={`live-dot ${connected ? "is-live" : ""}`} />
           <span>{connected ? "事件流已连接" : "事件流重连中"}</span>
           <span className="topbar-rule" />
           <span>{activeCount} 个任务运行中</span>
         </div>
+
         <div className="topbar-meta">
-          <span className={`connection-pill ${health?.onebot.connected ? "ok" : ""}`}>
+          <button
+            type="button"
+            className={`connection-pill ${connectedChannels > 0 ? "ok" : ""}`}
+            onClick={() => navigate("channels")}
+          >
             <span className="pill-light" />
-            NapCat {health?.onebot.connected ? "在线" : "未连接"}
-          </span>
+            Channels {connectedChannels}/{channels.length} 在线
+          </button>
+          <button
+            type="button"
+            className={`auth-button ${hasToken ? "is-authed" : ""} ${authInvalid ? "is-invalid" : ""}`}
+            onClick={() => setAuthOpen(true)}
+          >
+            {authInvalid ? "Token 无效" : hasToken ? "Admin" : "Auth"}
+          </button>
           <span className="clock">OPS / 001</span>
+          <button
+            type="button"
+            className={`menu-toggle ${navOpen ? "is-open" : ""}`}
+            onClick={() => setNavOpen((open) => !open)}
+            aria-label="打开导航"
+            aria-expanded={navOpen}
+          >
+            <i />
+            <i />
+          </button>
         </div>
       </header>
 
-      <main className="dispatch-grid">
-        <aside className="run-rail">
-          <div className="rail-heading">
-            <div>
-              <p className="eyebrow">Dispatch queue</p>
-              <h1>运行记录</h1>
-            </div>
-            <span className="count-badge">{runs.length.toString().padStart(2, "0")}</span>
-          </div>
+      <nav className={`side-nav ${navOpen ? "is-open" : ""}`} aria-label="主导航">
+        <div className="nav-caption">CONTROL PLANE</div>
+        {NAV_ITEMS.map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            className={page === item.id ? "is-active" : ""}
+            onClick={() => navigate(item.id)}
+          >
+            <span className="nav-index">{item.index}</span>
+            <span className="nav-label">
+              <strong>{item.label}</strong>
+              <small>{item.description}</small>
+            </span>
+            <span className="nav-arrow">↗</span>
+          </button>
+        ))}
+        <div className="nav-foot">
+          <span className={`live-dot ${connected ? "is-live" : ""}`} />
+          <span>{health ? `UPTIME ${formatUptime(health.uptimeSeconds)}` : "CONNECTING"}</span>
+        </div>
+      </nav>
 
-          <div className="composer">
-            <label htmlFor="new-run">派发新任务</label>
-            <fieldset className="bot-picker" aria-label="选择 Bot">
-              {bots.map((bot) => (
-                <button
-                  type="button"
-                  key={bot.id}
-                  className={bot.id === selectedBotId ? "is-active" : ""}
-                  onClick={() => setSelectedBotId(bot.id)}
-                  title={bot.description}
-                >
-                  {bot.name}
-                </button>
-              ))}
-            </fieldset>
-            <textarea
-              id="new-run"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  void submit();
-                }
-              }}
-              placeholder="例如：检查登录流程，修复失败测试并给出变更摘要。"
-              rows={4}
-            />
-            <div className="composer-footer">
-              <span>
-                <kbd>Ctrl</kbd> <b>+</b> <kbd>Enter</kbd>
-              </span>
-              <button
-                type="button"
-                className="dispatch-button"
-                onClick={() => void submit()}
-                disabled={submitting}
-              >
-                {submitting ? "派发中" : "开始派发"}
-                <span aria-hidden="true">↗</span>
-              </button>
-            </div>
-          </div>
+      <div className={`page-area ${page === "runs" ? "is-runs" : ""}`}>
+        {page === "runs" && (
+          <RunsPage
+            runs={runs}
+            bots={bots}
+            selectedId={selectedId}
+            detail={detail}
+            liveOutput={liveOutput}
+            error={error}
+            onSelect={setSelectedId}
+            onCreateRun={createRun}
+            onInterrupt={interrupt}
+            onResolveApproval={resolveApproval}
+            onClearError={() => setError(null)}
+          />
+        )}
+        {page === "channels" && (
+          <ChannelsPage
+            channels={channels}
+            loading={loading}
+            onRefresh={refreshChannels}
+            onError={setError}
+          />
+        )}
+        {page === "bots" && <BotsPage bots={bots} runs={runs} />}
+        {page === "memory" && <MemoryPage bots={bots} onError={setError} />}
+        {page === "tools" && <ToolsPage onError={setError} />}
+        {page === "schedules" && (
+          <SchedulesPage bots={bots} channels={channels} runs={runs} onError={setError} />
+        )}
+      </div>
 
-          <div className="run-list">
-            {runs.length === 0 ? (
-              <div className="empty-queue">
-                <span className="empty-glyph">∅</span>
-                <p>还没有任务</p>
-                <small>派发一个任务，FinalBot 会替你点将。</small>
-              </div>
-            ) : (
-              runs.map((run, index) => (
-                <button
-                  type="button"
-                  key={run.id}
-                  className={`run-card ${run.id === selectedId ? "is-selected" : ""}`}
-                  onClick={() => setSelectedId(run.id)}
-                  style={{ animationDelay: `${index * 35}ms` }}
-                >
-                  <div className="run-card-top">
-                    <span className={`state state-${run.state}`}>
-                      {STATE_LABEL[run.state] ?? run.state}
-                    </span>
-                    <span className="run-time">{timeAgo(run.createdAt)}</span>
-                  </div>
-                  <strong>{shorten(run.prompt, 56)}</strong>
-                  <div className="run-card-bottom">
-                    <span>
-                      {run.botName} / {run.agent}
-                    </span>
-                    <span className="run-id">{run.id.slice(-8)}</span>
-                  </div>
-                </button>
-              ))
-            )}
-          </div>
-        </aside>
-
-        <section className="workbench">
-          {!selected ? (
-            <div className="idle-stage">
-              <div className="orbital" aria-hidden="true">
-                <div className="orbit orbit-one" />
-                <div className="orbit orbit-two" />
-                <div className="orbit orbit-three" />
-                <div className="core-mark">F</div>
-              </div>
-              <p className="eyebrow">FinalBot command plane</p>
-              <h2>一句话，点齐你的 Agent。</h2>
-              <p className="idle-copy">
-                从一个任务开始。FinalBot 会创建隔离工作区、启动 Coding Agent，
-                把每一步执行、审批和结果留在这里。
-              </p>
-            </div>
-          ) : (
-            <>
-              <div className="workbench-head">
-                <div>
-                  <div className="breadcrumb">
-                    RUN / {selected.id.slice(-8).toUpperCase()} / {selected.botName.toUpperCase()}
-                  </div>
-                  <h2>{shorten(selected.prompt, 110)}</h2>
-                </div>
-                <div className="workbench-actions">
-                  <span className={`large-state state-${selected.state}`}>
-                    {STATE_LABEL[selected.state] ?? selected.state}
-                  </span>
-                  {!TERMINAL.has(selected.state) && (
-                    <button type="button" className="quiet-button" onClick={() => void interrupt()}>
-                      中断任务
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="workbench-grid">
-                <div className="console-panel">
-                  <div className="panel-label">
-                    <span>Agent stream</span>
-                    <span className="stream-status">
-                      <i className={selected.state === "running" ? "pulse" : ""} />
-                      {selected.state === "running" ? "LIVE" : "SNAPSHOT"}
-                    </span>
-                  </div>
-                  <div className="terminal-head">
-                    <span className="terminal-dot red" />
-                    <span className="terminal-dot amber" />
-                    <span className="terminal-dot green" />
-                    <span>finalbot://{selected.agent}/dispatch</span>
-                  </div>
-                  <pre className="agent-output" ref={outputRef}>
-                    {liveOutput || "等待 Agent 输出..."}
-                  </pre>
-                  {error && (
-                    <div className="error-banner">
-                      <strong>连接错误</strong>
-                      <span>{error}</span>
-                      <button type="button" onClick={() => setError(null)}>
-                        关闭
-                      </button>
-                    </div>
-                  )}
-                </div>
-
-                <aside className="inspector">
-                  <div className="inspector-section">
-                    <p className="eyebrow">Run control</p>
-                    <dl className="meta-list">
-                      <div>
-                        <dt>状态</dt>
-                        <dd>{STATE_LABEL[selected.state] ?? selected.state}</dd>
-                      </div>
-                      <div>
-                        <dt>Bot</dt>
-                        <dd>{selected.botName}</dd>
-                      </div>
-                      <div>
-                        <dt>Agent</dt>
-                        <dd>{selected.agent}</dd>
-                      </div>
-                      <div>
-                        <dt>模型</dt>
-                        <dd>{selected.model ?? "默认模型"}</dd>
-                      </div>
-                      <div>
-                        <dt>开始</dt>
-                        <dd>{selected.startedAt ? timeAgo(selected.startedAt) : "等待"}</dd>
-                      </div>
-                      <div>
-                        <dt>线程</dt>
-                        <dd title={selected.nativeThreadId ?? ""}>
-                          {selected.nativeThreadId?.slice(-12) ?? "待绑定"}
-                        </dd>
-                      </div>
-                    </dl>
-                  </div>
-
-                  <div className="inspector-section workspace-section">
-                    <p className="eyebrow">Workspace</p>
-                    <p className="path">{selected.workspacePath ?? "尚未创建工作区"}</p>
-                    <div className="workspace-badge">
-                      <span className="branch-icon">⌘</span>
-                      隔离 Git worktree
-                    </div>
-                  </div>
-
-                  <div className="inspector-section">
-                    <div className="section-title-row">
-                      <p className="eyebrow">Approvals</p>
-                      <span className="mini-count">{pendingApprovals.length}</span>
-                    </div>
-                    {pendingApprovals.length === 0 ? (
-                      <p className="muted-copy">当前没有待审批操作。</p>
-                    ) : (
-                      pendingApprovals.map((approval) => (
-                        <ApprovalCard
-                          key={approval.requestId}
-                          approval={approval}
-                          onResolve={resolveApproval}
-                        />
-                      ))
-                    )}
-                  </div>
-
-                  <div className="inspector-section phases">
-                    <p className="eyebrow">Checkpoints</p>
-                    {detail?.phases.length ? (
-                      detail.phases.map((phase) => (
-                        <div key={`${phase.phase}-${phase.attempt}`} className="phase-row">
-                          <span className={`phase-mark phase-${phase.status}`} />
-                          <div>
-                            <strong>{phase.phase}</strong>
-                            <small>
-                              {phase.status} / attempt {phase.attempt}
-                            </small>
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="muted-copy">首个 checkpoint 将在执行后出现。</p>
-                    )}
-                  </div>
-                </aside>
-              </div>
-            </>
-          )}
-        </section>
-      </main>
       <footer className="footer-line">
         <span>FINALBOT / PERSONAL AGENT CONTROL PLANE</span>
-        <span>TS + BUN / LOCAL FIRST</span>
+        <span>{page.toUpperCase()} / TS + BUN / LOCAL FIRST</span>
       </footer>
+
+      {error && page !== "runs" && (
+        <div className="global-error" role="alert">
+          <strong>操作失败</strong>
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)}>
+            关闭
+          </button>
+        </div>
+      )}
+
+      {authOpen && (
+        <div className="dialog-backdrop" role="presentation">
+          <section
+            className="auth-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="auth-title"
+          >
+            <div className="auth-dialog-head">
+              <div>
+                <p className="eyebrow">Gateway authentication</p>
+                <h2 id="auth-title">管理员 Token</h2>
+              </div>
+              <button type="button" className="dialog-close" onClick={() => setAuthOpen(false)}>
+                ×
+              </button>
+            </div>
+            <p>
+              非回环监听时必须携带 <code>Bearer FINALBOT_ADMIN_TOKEN</code>。Token
+              只保存在当前标签页的 <code>sessionStorage</code>，关闭标签页后清除。
+            </p>
+            {authInvalid && (
+              <div className="inline-error">
+                <strong>认证失败</strong>
+                <span>Token 缺失或已失效，请重新输入。</span>
+              </div>
+            )}
+            <label className="token-field">
+              Admin token
+              <input
+                type="password"
+                value={tokenDraft}
+                onChange={(event) => setTokenDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") saveToken();
+                }}
+                autoComplete="off"
+                placeholder="输入服务端 FINALBOT_ADMIN_TOKEN"
+              />
+            </label>
+            <div className="auth-actions">
+              {hasToken && (
+                <button type="button" className="quiet-button" onClick={clearToken}>
+                  清除 Token
+                </button>
+              )}
+              <button type="button" className="dispatch-button" onClick={saveToken}>
+                保存并重连
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
 
-function ApprovalCard({
-  approval,
-  onResolve,
-}: {
-  approval: ApprovalSummary;
-  onResolve: (id: string, action: string) => Promise<void>;
-}) {
-  return (
-    <div className="approval-card">
-      <span className="approval-kind">{approval.kind.replaceAll("_", " ")}</span>
-      <strong>{approval.title}</strong>
-      <p>{approval.detail}</p>
-      <div className="approval-actions">
-        <button
-          type="button"
-          className="approve"
-          onClick={() => void onResolve(approval.requestId, "accept")}
-        >
-          允许本次
-        </button>
-        {approval.canAcceptForSession && (
-          <button
-            type="button"
-            className="approve"
-            onClick={() => void onResolve(approval.requestId, "accept_session")}
-          >
-            本会话允许
-          </button>
-        )}
-        <button type="button" onClick={() => void onResolve(approval.requestId, "decline")}>
-          拒绝
-        </button>
-        <button
-          type="button"
-          className="cancel-action"
-          onClick={() => void onResolve(approval.requestId, "cancel")}
-        >
-          取消
-        </button>
-      </div>
-    </div>
-  );
+function pageFromHash(): PageId {
+  const value = window.location.hash.replace(/^#\/?/, "");
+  return NAV_ITEMS.some((item) => item.id === value) ? (value as PageId) : "runs";
+}
+
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
+}
+
+function handleApiError(
+  cause: unknown,
+  setError: (message: string | null) => void,
+  setAuthOpen: (open: boolean) => void,
+): boolean {
+  if (cause instanceof ApiRequestError && cause.status === 401) {
+    setAuthOpen(true);
+    setError(null);
+    return true;
+  }
+  setError(cause instanceof Error ? cause.message : String(cause));
+  return false;
 }

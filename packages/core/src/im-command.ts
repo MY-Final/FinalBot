@@ -16,6 +16,11 @@ export type ImCommand =
       prompt: string;
     }
   | {
+      kind: "pair";
+      raw: string;
+      code: string;
+    }
+  | {
       kind: "bots" | "cancel" | "status" | "help" | "unknown";
       raw: string;
     };
@@ -64,6 +69,10 @@ export function parseImCommand(input: string): ImCommand | null {
         : { kind: "unknown", raw: text };
     case "bot":
       return parseBotDispatch(argument, text);
+    case "pair":
+      return /^[A-Za-z0-9_-]{6,64}$/.test(argument)
+        ? { kind: "pair", code: argument, raw: text }
+        : { kind: "unknown", raw: text };
     case "允许":
       return withOptionalRequestId("approve", argument, text);
     case "允许本会话":
@@ -86,6 +95,10 @@ export function parseImCommand(input: string): ImCommand | null {
         : { kind: "unknown", raw: text };
     case "派发":
       return parseBotDispatch(argument, text);
+    case "配对":
+      return /^[A-Za-z0-9_-]{6,64}$/.test(argument)
+        ? { kind: "pair", code: argument, raw: text }
+        : { kind: "unknown", raw: text };
     default:
       return { kind: "unknown", raw: text };
   }

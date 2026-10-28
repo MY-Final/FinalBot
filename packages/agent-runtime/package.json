@@ -1,0 +1,14 @@
+{
+  "name": "@finalbot/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@finalbot/core": "workspace:*",
+    "@finalbot/db": "workspace:*",
+    "croner": "^9.1.0"
+  }
+}

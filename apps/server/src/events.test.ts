@@ -28,13 +28,7 @@ describe("event streaming", () => {
       FINALBOT_FAKE_AGENT: "1",
     });
     const runs = new RunService(db, bus, config);
-    const app = createApp(
-      db,
-      bus,
-      runs,
-      () => ({ configured: false, connected: false, accountId: null }),
-      null,
-    );
+    const app = createApp(db, bus, runs, () => [], null);
 
     try {
       append(db, bus, "history");

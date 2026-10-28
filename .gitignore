@@ -5,6 +5,9 @@ dist/
 .napcat.dev
 *.log
 data/
+*.sqlite
+*.sqlite-*
+*.sqlite.*.bak
 coverage/
 apps/web/.vite/
 apps/desktop/release/
